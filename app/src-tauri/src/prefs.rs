@@ -31,7 +31,7 @@ impl UserPrefs {
         Self {
             version: VERSION,
             display_name: String::new(),
-            relay_url: "http://localhost:8787".into(),
+            relay_url: "https://windows-live-translation-app-1.onrender.com".into(),
             source_lang: "en".into(),
             target_lang: "hi".into(),
             input_device: None,
