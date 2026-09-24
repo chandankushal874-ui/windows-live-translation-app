@@ -1,0 +1,190 @@
+========================================================================================
+           OLLALINK TRANSLATE -- DETAILED SYSTEM & VOICE DESIGN REPORT           
+                       1:1 Zero-Latency Voice Translation                       
+========================================================================================
+Generated: 2026-09-23 13:50:39 UTC
+Platform: Windows 11 x64 (MSVC Native / Tauri 2 / Rust / Node.js Relay / GPU Sound-Stream)
+Repository: C:\ollalink-translate
+Package: C:\ollalink-translate\Ollalink-Translate-Windows-x64.zip (7.00 MB)
+
+----------------------------------------------------------------------------------------
+1. EXECUTIVE SUMMARY & SYSTEM OVERVIEW
+----------------------------------------------------------------------------------------
+Ollalink Translate is an ultra-low-latency 1:1 real-time voice-to-voice translation system
+built for Windows. It couples a native Tauri 2 desktop client (Rust + CPAL audio engine)
+with a high-throughput Node.js relay server and Ollalink Sound-Stream GPU inference.
+
+Key Specifications:
+  * UI Footprint: Vanilla TypeScript/HTML/CSS (Vite bundle < 12 kB gzip, zero heavy frameworks)
+  * Audio Capture: CPAL 16 kHz 16-bit mono PCM chunks (20 ms frame, 120 ms jitter buffer)
+  * End-to-End Latency Target: < 400 ms cross-language conversational throughput
+  * Security: HMAC SHA-256 session tokens with automatic 80% TTL renewals
+  * Room Topology: Pure 1:1 peer isolation with 6-character collision-resistant codes
+
+----------------------------------------------------------------------------------------
+2. HOST AND JOINING BUSINESS LOGIC ARCHITECTURE
+----------------------------------------------------------------------------------------
+A. Dual-Hero Flow:
+   - Host Card: Instant blank room creation with auto-generated 6-character room code.
+   - Join Card: 6-character alphanumeric code entry with auto-uppercase & clipboard paste.
+
+B. Role-Aware Presence Banner (RESOLVED & VALIDATED):
+   - Previously: Both host and joined guests were seeing "Waiting for your partner to join...".
+   - Fixed Behavior:
+     * Host Banner: Shows "Waiting for your partner to join... Share room code: [CODE]" with
+       an amber pulsing dot until a peer connects.
+     * Guest Banner: When joining with a code, immediately displays:
+       "[CONNECTED] Successfully joined room [CODE]! In 1:1 call with [Host Name] ([HostLang] -> [YourLang])"
+       (or "[CONNECTED] Successfully joined room [CODE]! Connecting with host..." if connecting).
+       The guest NEVER sees the host waiting message.
+     * Host On-Join: When the guest arrives, the host banner automatically flips to:
+       "[CONNECTED] Partner [Guest Name] joined! In 1:1 call ([GuestLang] -> [YourLang])".
+     * Disconnection Handling: Role-aware reversion when partner leaves.
+
+C. Dedicated Pre-Join Name Function:
+   - Both Host and Join cards have explicit "Your Name" input fields.
+   - Pre-Join Validation: If a user enters a 6-character code or clicks "Join Call" with
+     a blank name, the field shakes with an alert border and autofocuses with the warning:
+     "Please enter your name first so the host knows who joined!".
+   - The guest's real name is passed to the session token and rendered in the host's UI,
+     the participants sidebar ("Rahul (Partner)"), and the live caption transcripts.
+
+----------------------------------------------------------------------------------------
+3. VOICE DESIGNS CATALOG & ASSETS AUDIT
+----------------------------------------------------------------------------------------
+Source Directory: C:/Users/Dell/Downloads/voice designs
+Total Voice Design Files: 51 audio assets across 7 languages
+
+Language Breakdown:
+  - Chinese (Mandarin): 8 designs (chi 1-4, chinese 1-4)
+  - English: 7 designs (eng 1-4, eng 2-3, eng.wav, male/female HD models)
+  - French: 7 designs (french 1-4, french 1-3 WAV/MP3)
+  - Hindi: 10 designs (hin 1-6, hin fe, hin male 1)
+  - Kannada: 1 design (kan 1.wav)
+  - Spanish: 8 designs (spanish 1-4 script 1 & 2)
+  - Tamil: 10 designs (tamil 1-4, tam 3-6, tamil 1-2)
+
+--- SCRIPT 1 INVENTORY (27 Files) ---
+  * chi 1.mp3              |   548.1 KB | MP3  | 2026-09-23 13:08:02
+  * chi 2.mp3              |   594.2 KB | MP3  | 2026-09-23 13:08:04
+  * chi 3.mp3              |   538.3 KB | MP3  | 2026-09-23 13:09:15
+  * chi 4.mp3              |   509.3 KB | MP3  | 2026-09-23 13:09:16
+  * eng 2.mp3              |   154.5 KB | MP3  | 2026-09-23 10:33:13
+  * eng 3.mp3              |   158.9 KB | MP3  | 2026-09-23 10:34:54
+  * eng.wav                |  1200.0 KB | WAV  | 2026-09-23 12:13:50
+  * french 1.wav           |  1057.5 KB | WAV  | 2026-09-23 11:29:31
+  * french 2.wav           |  1065.0 KB | WAV  | 2026-09-23 11:31:06
+  * french 3.mp3           |   160.2 KB | MP3  | 2026-09-23 11:33:47
+  * hin 3.mp3              |   514.2 KB | MP3  | 2026-09-23 13:15:57
+  * hin 4.mp3              |   494.2 KB | MP3  | 2026-09-23 13:15:58
+  * hin 5.mp3              |   525.6 KB | MP3  | 2026-09-23 13:14:56
+  * hin 6.mp3              |   623.2 KB | MP3  | 2026-09-23 13:14:57
+  * hin fe.mp3             |   174.8 KB | MP3  | 2026-09-23 10:41:59
+  * hin male 1.mp3         |   193.8 KB | MP3  | 2026-09-23 10:41:15
+  * kan 1.wav              |  1549.8 KB | WAV  | 2026-09-23 11:42:46
+  * spanish 1.mp3          |   149.3 KB | MP3  | 2026-09-23 11:23:28
+  * spanish 2.mp3          |   137.5 KB | MP3  | 2026-09-23 11:23:56
+  * spanish 3.wav          |  1080.0 KB | WAV  | 2026-09-23 11:24:59
+  * spanish 4.wav          |  1162.5 KB | WAV  | 2026-09-23 11:24:36
+  * tam 3.mp3              |   442.0 KB | MP3  | 2026-09-23 13:12:21
+  * tam 4.mp3              |   493.0 KB | MP3  | 2026-09-23 13:12:22
+  * tam 5.mp3              |   643.2 KB | MP3  | 2026-09-23 13:11:29
+  * tam 6.mp3              |   443.2 KB | MP3  | 2026-09-23 13:11:31
+  * tamil 1.mp3            |   187.5 KB | MP3  | 2026-09-23 11:13:08
+  * tamil 2.mp3            |   169.6 KB | MP3  | 2026-09-23 11:13:34
+
+--- SCRIPT 2 INVENTORY (24 Files) ---
+  * chinese 1.mp3          |   638.3 KB | MP3  | 2026-09-23 13:02:53
+  * chinese 2.mp3          |   520.7 KB | MP3  | 2026-09-23 13:02:55
+  * chinese 3.mp3          |   628.1 KB | MP3  | 2026-09-23 13:03:26
+  * chinese 4.mp3          |   635.4 KB | MP3  | 2026-09-23 13:03:27
+  * eng 1.wav              |  1365.0 KB | WAV  | 2026-09-23 12:17:37
+  * eng 2.wav              |  1417.5 KB | WAV  | 2026-09-23 12:18:01
+  * eng 3.mp3              |   190.5 KB | MP3  | 2026-09-23 12:29:07
+  * eng 4.mp3              |   192.2 KB | MP3  | 2026-09-23 12:31:54
+  * french 1.wav           |  1147.5 KB | WAV  | 2026-09-23 12:19:37
+  * french 2.wav           |  1170.0 KB | WAV  | 2026-09-23 12:20:48
+  * french 3.mp3           |   160.5 KB | MP3  | 2026-09-23 12:22:22
+  * french 4.mp3           |   694.2 KB | MP3  | 2026-09-23 12:56:11
+  * hin 1.mp3              |   620.7 KB | MP3  | 2026-09-23 13:00:16
+  * hin 2.mp3              |   736.7 KB | MP3  | 2026-09-23 13:00:19
+  * hin 3.mp3              |   555.4 KB | MP3  | 2026-09-23 13:01:17
+  * hin 4.mp3              |   636.7 KB | MP3  | 2026-09-23 13:01:18
+  * spanish 1.mp3          |   199.7 KB | MP3  | 2026-09-23 12:24:50
+  * spanish 2.mp3          |   192.7 KB | MP3  | 2026-09-23 12:26:20
+  * spanish 3.mp3          |   603.2 KB | MP3  | 2026-09-23 12:51:32
+  * spanish 4.mp3          |   543.2 KB | MP3  | 2026-09-23 12:49:46
+  * tamil 1.mp3            |   247.5 KB | MP3  | 2026-09-23 12:40:21
+  * tamil 2.wav            |  1856.1 KB | WAV  | 2026-09-23 12:42:14
+  * tamil 3.mp3            |   529.7 KB | MP3  | 2026-09-23 12:44:29
+  * tamil 4.mp3            |   512.6 KB | MP3  | 2026-09-23 12:44:40
+
+----------------------------------------------------------------------------------------
+4. AUTOMATED TEST SUITE & VALIDATION REPORT
+----------------------------------------------------------------------------------------
+Deep Testing Suite: 15 Test Suites | 111 Total Tests | 100% Pass Rate | 0 Failures
+
+Results Matrix:
+  [PASS] UNIT: auth.test.js               (HMAC token minting, verification, expiry)
+  [PASS] UNIT: rooms.test.js              (Room allocation, collision rejection)
+  [PASS] UNIT: audio_chunks.test.js       (PCM binary framing, chunk reassembly)
+  [PASS] UNIT: captions_routing.test.js   (Captions delivery, display name mapping)
+  [PASS] UNIT: realtime_protocol.test.js  (WebSocket frame state machine)
+  [PASS] UNIT: regressions.test.js        (BOM clean UTF-8, serialization)
+  [PASS] INTEGRATION: server.test.js      (HTTP REST API, health, stats)
+  [PASS] INTEGRATION: receive_path.test.js(Binary audio pipeline receive flow)
+  [PASS] INTEGRATION: rooms_deep.test.js  (Concurrency, race condition resilience)
+  [PASS] INTEGRATION: multi_target.test.js(Dynamic multi-target upstream translation)
+  [PASS] INTEGRATION: deep_e2e_pipeline.js(End-to-end audio streaming pipeline)
+  [PASS] INTEGRATION: deep_e2e_advanced.js(Network resilience, reconnecting socket)
+  [PASS] INTEGRATION: landing_flow_e2e.js (Landing dual-action integration)
+  [PASS] INTEGRATION: host_joining_deep.js(Room codes, host/guest discovery, seat limits)
+
+Summary: 111 tests passed in 1.48s.
+
+----------------------------------------------------------------------------------------
+5. ZERO-DOCKER DISTRIBUTION & 1-CLICK WINDOWS INSTALLERS
+----------------------------------------------------------------------------------------
+Package Created: C:\ollalink-translate\Ollalink-Translate-Windows-x64.zip (7.00 MB)
+
+Key Bundle Files:
+  1. Ollalink-Translate-Setup.exe   (3.18 MB NSIS production desktop installer)
+  2. ollalink-translate.exe         (9.57 MB standalone portable release executable)
+  3. install.bat                    (1-Click batch launcher, auto-bypasses PowerShell policy)
+  4. install-dependencies.ps1       (Automated installer for VC++ 2015-2022, WebView2, Node LTS)
+  5. download-and-install.ps1       (Standalone web/local extractor + Desktop shortcut creator)
+  6. start-release.bat              (Starts local relay and launches release desktop app)
+  7. start-all.bat                  (Starts local relay and launches dev desktop environment)
+  8. server/                        (Lightweight Node relay server source code)
+
+How to Share With Other Devices:
+  * Method 1: Send Ollalink-Translate-Windows-x64.zip. Recipient extracts and runs install.bat.
+  * Method 2: In PowerShell, run: powershell -ExecutionPolicy Bypass -File .\download-and-install.ps1
+
+========================================================================================
+                                    END OF REPORT                                       
+========================================================================================
+
+----------------------------------------------------------------------------------------
+6. LIVE GPU SPEECH TRANSLATION & RECEIVER AUDIO DELIVERY PROOF
+----------------------------------------------------------------------------------------
+Date Verified: 2026-09-23T17:16:57.343Z
+Upstream Server: wss://sound-stream.ollalink.com/v1/speech/stream (Live Cloud GPU)
+Test Audio: C:\Users\Dell\Downloads\voice designs\script 1\eng.wav
+
+A. Live GPU Speech Recognition & Translation:
+  - Input Spoken English: "Like this today, we will understand how a router sends."
+  - GPU Translated Hindi:  "आज भी, हम यह समझेंगे कि राउटर कैसे संदेश भेजता है।"
+  - GPU First Recognition Latency: 1,052 ms
+
+B. End-to-End Delivery to Receiver (Participant Bob):
+  - Audio Header Frames Received by Bob: 61 frames
+  - Binary PCM Audio Chunks Received by Bob: 60 chunks
+  - Total Binary Audio Received by Bob: 491,520 bytes (480.0 KB)
+  - Live Captions / Deltas Received by Bob: 238 events
+  - Saved Reassembled Audio on Disk: C:\ollalink-translate\bob_received_translated_audio.wav
+
+VERDICTS:
+  [PASS] Spoken Audio Translated on GPU: YES
+  [PASS] Audio Frames Reached Receiver:  YES
+  [PASS] Translations Reached Receiver:  YES

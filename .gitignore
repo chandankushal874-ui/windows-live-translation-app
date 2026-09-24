@@ -1,0 +1,37 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.vscode/
+.idea/
+
+# Secrets — never commit
+.env
+.env.local
+*.pem
+*.key
+secrets.json
+
+# Node dependencies and build artifacts
+node_modules/
+dist/
+dist-package/
+*.log
+
+# Rust / Tauri build artifacts
+app/src-tauri/target/
+app/ui/dist/
+app/ui/node_modules/
+
+# Compiled Binaries & Packages (stored in releases, not git)
+*.msi
+*.exe
+*.app
+*.dmg
+*.zip
+
+# Audio test buffers
+*.wav
+*.pcm
+capture-*

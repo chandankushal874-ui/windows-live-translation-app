@@ -1,0 +1,15 @@
+{
+  "name": "ollalink-translate",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Real-time 1:1 Voice Translation Windows Desktop App",
+  "scripts": {
+    "start": "node scripts/start-dev.mjs",
+    "dev": "node scripts/start-dev.mjs",
+    "start:relay": "npm --prefix server start",
+    "start:ui": "npm --prefix app/ui run dev",
+    "start:app": "npm --prefix app run tauri dev",
+    "test": "npm --prefix server test",
+    "build:app": "npm --prefix app run tauri build"
+  }
+}

@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ollalink Translate — 1:1 Voice Translation</title>
+  <link rel="stylesheet" href="/src/ui.css" />
+</head>
+<body>
+  <div id="app">
+    <!-- Top Navigation Bar -->
+    <header class="app-header">
+      <div class="brand">
+        <div class="brand-logo">
+          <span class="logo-dot"></span>
+          <span class="brand-title">Ollalink <strong>Translate</strong></span>
+        </div>
+        <span class="brand-badge">1:1 Realtime Speech</span>
+      </div>
+      <div class="header-right">
+        <span id="conn-status" class="pill pill-idle">idle</span>
+      </div>
+    </header>
+
+    <!-- LANDING VIEW (Pre-call) -->
+    <section id="landing-view" class="landing-container">
+      <div class="landing-hero-text">
+        <h1>Zero-Latency Voice Translation</h1>
+        <p>Speak in your language. Your partner hears in theirs. Live GPU sound-stream.</p>
+      </div>
+
+      <!-- Language & Identity Setup Strip -->
+      <div class="card setup-card">
+        <div class="setup-grid">
+          <div class="field-group">
+            <label for="display-name">Profile Name</label>
+            <input id="display-name" type="text" placeholder="Your Name" maxlength="48" />
+          </div>
+
+          <div class="field-group">
+            <label for="source-lang">I Speak</label>
+            <select id="source-lang">
+              <option value="en">English (en)</option>
+              <option value="hi" selected>Hindi (hi)</option>
+              <option value="es">Spanish (es)</option>
+              <option value="fr">French (fr)</option>
+              <option value="auto">Auto Detect</option>
+            </select>
+          </div>
+
+          <div class="field-group">
+            <label for="target-lang">I Want to Hear</label>
+            <select id="target-lang">
+              <option value="en" selected>English (en) — HD Voice</option>
+              <option value="hi">Hindi (hi) — HD Voice</option>
+              <option value="kn">Kannada (kn) — HD Voice</option>
+              <option value="ta">Tamil (ta) — HD Voice</option>
+              <option value="te">Telugu (te)</option>
+              <option value="es">Spanish (es)</option>
+              <option value="fr">French (fr)</option>
+              <option value="de">German (de)</option>
+              <option value="zh">Chinese (zh)</option>
+              <option value="ar">Arabic (ar)</option>
+              <option value="ja">Japanese (ja)</option>
+              <option value="ru">Russian (ru)</option>
+              <option value="pt">Portuguese (pt)</option>
+              <option value="it">Italian (it)</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Collapsible Audio Devices & Settings -->
+        <details class="advanced-settings">
+          <summary>Audio Devices & Advanced</summary>
+          <div class="advanced-grid">
+            <div class="field-group">
+              <label for="input-device">Microphone</label>
+              <select id="input-device"></select>
+            </div>
+            <div class="field-group">
+              <label for="output-device">Speaker</label>
+              <select id="output-device"></select>
+            </div>
+            <div class="field-group">
+              <label for="relay-url">Relay Server</label>
+              <input id="relay-url" type="text" value="http://localhost:8787" />
+            </div>
+            <div class="field-group checkbox-group">
+              <label class="inline-checkbox">
+                <input id="captions-on" type="checkbox" checked />
+                <span>Show live captions during call</span>
+              </label>
+            </div>
+          </div>
+        </details>
+      </div>
+
+      <!-- Relay Status Alert Banner -->
+      <div id="landing-error-banner" class="landing-error-banner" style="display: none;"></div>
+
+      <!-- 2 Hero Options: Host or Join -->
+      <div class="hero-actions-container">
+        <!-- OPTION 1: HOST -->
+        <div class="action-card host-card">
+          <div class="card-icon">🎙️</div>
+          <h2>Host New Call</h2>
+          <p>Create a fresh 1:1 room instantly and invite your partner with a code.</p>
+          
+          <div class="card-field">
+            <label for="host-name-input">Your Name</label>
+            <input 
+              id="host-name-input" 
+              type="text" 
+              class="name-input" 
+              placeholder="e.g. Alex (Host)" 
+              maxlength="32" 
+              autocomplete="name" 
+            />
+          </div>
+
+          <button id="btn-host" class="btn-primary btn-large">
+            <span>🎙️</span> Host Call
+          </button>
+          <span id="host-hint" class="join-hint"></span>
+        </div>
+
+        <div class="action-divider">
+          <span class="divider-line"></span>
+          <span class="divider-badge">OR</span>
+          <span class="divider-line"></span>
+        </div>
+
+        <!-- OPTION 2: JOIN -->
+        <div class="action-card join-card">
+          <div class="card-icon">🔗</div>
+          <h2>Join with Code</h2>
+          <p>Got a 6-character code? Enter your name and code to join immediately.</p>
+          
+          <div class="card-field">
+            <label for="join-name-input">Your Name <span class="required-star">*</span></label>
+            <input 
+              id="join-name-input" 
+              type="text" 
+              class="name-input" 
+              placeholder="Enter your name (e.g. Rahul)" 
+              maxlength="32" 
+              autocomplete="name" 
+            />
+          </div>
+
+          <div class="card-field">
+            <label for="room-code-input">Room Code</label>
+            <div class="join-input-wrapper">
+              <input 
+                id="room-code-input" 
+                type="text" 
+                class="code-input" 
+                placeholder="KHJP3J" 
+                maxlength="6" 
+                autocomplete="off" 
+                spellcheck="false" 
+              />
+              <button id="btn-paste-code" class="btn-icon" title="Paste from clipboard">📋</button>
+            </div>
+          </div>
+          
+          <button id="btn-join" class="btn-secondary btn-large">
+            <span>🔗</span> Join Call
+          </button>
+          <span id="join-hint" class="join-hint">Auto-connects when 6-char code is entered</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- IN-CALL VIEW (Active Call) -->
+    <section id="call-view" class="call-container" style="display: none;">
+      <!-- Active Room Header Banner -->
+      <div class="room-banner">
+        <div class="room-code-group">
+          <span class="room-label">ROOM CODE:</span>
+          <span id="active-room-display" class="room-code-badge">------</span>
+          <button id="btn-copy-code" class="btn-pill" title="Copy 6-digit code">
+            📋 Copy Code
+          </button>
+          <button id="btn-copy-invite" class="btn-pill" title="Copy full invite message">
+            ✉️ Copy Invite
+          </button>
+          <span id="copy-toast" class="copy-toast"></span>
+        </div>
+
+        <div class="room-controls">
+          <button id="btn-end" class="btn-danger">
+            📞 End Call
+          </button>
+        </div>
+      </div>
+
+      <!-- Peer Status / Waiting Alert -->
+      <div id="peer-status-box" class="peer-status-box waiting">
+        <span class="status-indicator-dot"></span>
+        <span id="peer-status-text">Waiting for your partner to join... Share your room code.</span>
+      </div>
+
+      <!-- Mid-Call Audio & Settings Bar -->
+      <div class="call-controls-bar">
+        <div class="midcall-langs">
+          <label>
+            <span>Speaking:</span>
+            <select id="midcall-source-lang">
+              <option value="en">English (en)</option>
+              <option value="hi">Hindi (hi)</option>
+              <option value="es">Spanish (es)</option>
+              <option value="fr">French (fr)</option>
+            </select>
+          </label>
+          <label>
+            <span>Hearing:</span>
+            <select id="midcall-target-lang">
+              <option value="en">English (en)</option>
+              <option value="hi">Hindi (hi)</option>
+              <option value="kn">Kannada (kn)</option>
+              <option value="ta">Tamil (ta)</option>
+              <option value="te">Telugu (te)</option>
+              <option value="es">Spanish (es)</option>
+              <option value="fr">French (fr)</option>
+              <option value="de">German (de)</option>
+              <option value="zh">Chinese (zh)</option>
+              <option value="ar">Arabic (ar)</option>
+              <option value="ja">Japanese (ja)</option>
+              <option value="ru">Russian (ru)</option>
+              <option value="pt">Portuguese (pt)</option>
+              <option value="it">Italian (it)</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="midcall-audio">
+          <label class="volume-slider-label">
+            <span>Gain</span>
+            <input id="input-gain" type="range" min="0" max="2" step="0.05" value="1" />
+            <span id="gain-readout">1.00</span>
+          </label>
+          <div class="vu-wrapper">
+            <span>Mic</span>
+            <div class="vu-track">
+              <div id="vu-fill" class="vu-fill"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="midcall-toggles">
+          <label class="inline-checkbox">
+            <input id="midcall-captions-on" type="checkbox" checked />
+            <span>Captions</span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Main In-Call Workspace: Participants & Live Captions -->
+      <div class="call-workspace">
+        <aside class="participants-pane">
+          <h3>Participants (1:1)</h3>
+          <ul id="participants"></ul>
+        </aside>
+
+        <section class="captions-pane">
+          <div class="captions-header">
+            <h3>Live Captions & Translations</h3>
+            <span class="captions-badge">GPU Sound-Stream</span>
+          </div>
+          <div id="captions-scroll" class="captions-scroll"></div>
+        </section>
+      </div>
+    </section>
+  </div>
+
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>

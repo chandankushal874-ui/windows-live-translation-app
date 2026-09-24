@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: ollalink-translate-relay
+    env: node
+    plan: free
+    region: oregon
+    rootDir: server
+    buildCommand: npm ci --omit=dev
+    startCommand: node src/bootstrap.js
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: OLLALINK_KEY
+        value: sk_f439f7e7394139022af3b458a76008e86e1ba0b93e497207
+      - key: OLLALINK_WS_URL
+        value: wss://sound-stream.ollalink.com/v1/speech/stream
+      - key: MAX_PARTICIPANTS
+        value: 4
