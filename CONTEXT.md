@@ -74,7 +74,7 @@ When scaling from 1:1 to multi-peer groups (up to 4+ participants per room):
 The repository includes `server/render.yaml` configured for Render Blueprint deployment:
 1. Connect repository to Render.
 2. Render detects `server/render.yaml` and provisions a Web Service with WebSockets enabled.
-3. Permanent URL: `https://your-app.onrender.com` / `wss://your-app.onrender.com/call`.
+3. Permanent URL: `https://windows-live-translation-app-1.onrender.com` / `wss://windows-live-translation-app-1.onrender.com/call`.
 
 ### Option B: Docker Containerization
 The repository includes a production multi-stage Alpine Dockerfile (`server/Dockerfile`):
