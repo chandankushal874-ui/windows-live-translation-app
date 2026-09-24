@@ -1,0 +1,13 @@
+{
+  "name": "ollalink-translate-app",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "npm --prefix ui run dev",
+    "tauri": "tauri",
+    "build": "npm --prefix ui run build"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
+  }
+}

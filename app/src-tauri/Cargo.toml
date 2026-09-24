@@ -1,0 +1,63 @@
+[package]
+name = "ollalink-translate"
+version = "0.1.0"
+description = "Real-time voice-to-voice translation client for Windows"
+authors = ["Networkers Home"]
+license = "Proprietary"
+edition = "2021"
+rust-version = "1.77"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Tauri
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Async runtime & concurrency
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = "0.3"
+parking_lot = "0.12"
+crossbeam-channel = "0.5"
+ringbuf = "0.4"
+
+# Audio I/O
+cpal = "0.15"
+rubato = { version = "0.15", features = [] }  # high-quality resampler
+
+# WebSocket client
+tokio-tungstenite = { version = "0.24", features = ["rustls-tls-native-roots"] }
+rustls = { version = "0.23", features = ["ring"] }
+webpki-roots = "0.26"
+
+# Logging / errors
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+thiserror = "1"
+anyhow = "1"
+
+# HTTP for session mint
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# Time
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+# Misc
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+once_cell = "1"
+dirs = "5"
+
+[profile.dev]
+incremental = true
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+opt-level = 3
+strip = "symbols"

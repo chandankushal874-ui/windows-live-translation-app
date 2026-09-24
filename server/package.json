@@ -1,0 +1,21 @@
+{
+  "name": "ollalink-translate-server",
+  "version": "0.1.0",
+  "description": "Auth, rooms, and session brokering for the Ollalink Translate Windows app",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node --watch src/bootstrap.js",
+    "start": "node src/bootstrap.js",
+    "test": "node scripts/run-tests.mjs",
+    "test:unit": "node --test --test-force-exit \"test/{auth,rooms,audio_chunks,captions_routing,realtime_protocol,regressions}.test.js\"",
+    "test:integration": "node scripts/run-integration-tests.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {}
+}
