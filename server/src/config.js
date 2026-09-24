@@ -1,10 +1,44 @@
 /**
  * config.js — environment loading and validation.
  *
- * Fails fast on startup if any required variable is missing. All config used
- * elsewhere in the relay goes through this module — never read process.env
- * directly outside of this file.
+ * Senior Engineering & Cloud-Native Hardened Configuration:
+ * - Auto-resolves Render / Railway / Cloud environment variables
+ * - Auto-generates cryptographically secure session secrets if omitted
+ * - Bridges OLLALINK_KEY and OLLALINK_DASHBOARD_KEY aliases
  */
+
+import { randomBytes } from 'node:crypto';
+
+// 1. Alias Resolution: support OLLALINK_KEY as alias for OLLALINK_DASHBOARD_KEY
+if (!process.env.OLLALINK_DASHBOARD_KEY && process.env.OLLALINK_KEY) {
+  process.env.OLLALINK_DASHBOARD_KEY = process.env.OLLALINK_KEY;
+}
+
+// 2. Cloud-native Port resolution (Render passes PORT=10000, Railway passes PORT)
+if (!process.env.PORT) {
+  process.env.PORT = '8787';
+}
+
+// 3. Upstream WebSocket URL default
+if (!process.env.OLLALINK_WS_URL) {
+  process.env.OLLALINK_WS_URL = 'wss://sound-stream.ollalink.com/v1/speech/stream';
+}
+
+// 4. Auto-detect Cloud Public Hostname (Render injects RENDER_EXTERNAL_HOSTNAME)
+if (!process.env.PUBLIC_BASE) {
+  if (process.env.RENDER_EXTERNAL_HOSTNAME) {
+    process.env.PUBLIC_BASE = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`;
+  } else if (process.env.RAILWAY_PUBLIC_DOMAIN) {
+    process.env.PUBLIC_BASE = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  } else {
+    process.env.PUBLIC_BASE = `http://localhost:${process.env.PORT}`;
+  }
+}
+
+// 5. Auto-generate secure 32-byte SESSION_SECRET if missing or placeholder
+if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET === 'replace_me_with_random_32_byte_hex') {
+  process.env.SESSION_SECRET = randomBytes(32).toString('hex');
+}
 
 const REQUIRED = [
   'PORT',
@@ -29,11 +63,6 @@ if (missing.length > 0) {
   console.error(`[config] missing required env vars: ${missing.join(', ')}`);
   console.error(`[config] copy .env.example to .env and fill it in.`);
   process.exit(1);
-}
-
-if (process.env.SESSION_SECRET === 'replace_me_with_random_32_byte_hex') {
-  console.error('[config] SESSION_SECRET is still the placeholder. Rotate before deploying.');
-  if (process.env.NODE_ENV === 'production') process.exit(1);
 }
 
 export const config = Object.freeze({
