@@ -27,7 +27,7 @@ import { config, log } from './config.js';
 import { mintSession, verifySession } from './auth.js';
 import { createRoom, getRoom, joinRoom, leaveRoom, others, roomStats, isValidRoomCode, startRoomSweeper } from './rooms.js';
 import { openOllalinkStream } from './ollalink.js';
-import { normalizeLang, hasProductionVoice, SOUND_STREAM_SOURCES, SOUND_STREAM_TARGETS, CAPTION_TARGETS_22 } from './langs.js';
+import { normalizeLang, hasProductionVoice, SOUND_STREAM_SOURCES, SOUND_STREAM_TARGETS, CAPTION_TARGETS_22, VOICE_PERSONAS, VOICE_TONES, normalizeVoice, normalizeTone } from './langs.js';
 
 // ---------- HTTP ----------
 
@@ -115,6 +115,8 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       targets: Array.from(SOUND_STREAM_TARGETS),
       captions: Array.from(CAPTION_TARGETS_22),
       productionVoices: Array.from(SOUND_STREAM_TARGETS).filter(hasProductionVoice),
+      voices: Array.from(VOICE_PERSONAS),
+      tones: Array.from(VOICE_TONES),
     }));
   }
 
@@ -135,7 +137,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
     req.on('end', () => {
       try {
         const parsed = JSON.parse(body || '{}');
-        const { userId, sourceLang, targetLang, captionsOn } = parsed;
+        const { userId, sourceLang, targetLang, captionsOn, voice, tone } = parsed;
         if (!userId || !sourceLang || !targetLang) {
           res.writeHead(400, { 'content-type': 'application/json' });
           return res.end(JSON.stringify({ error: 'userId, sourceLang, targetLang required' }));
@@ -156,7 +158,9 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           res.writeHead(400, { 'content-type': 'application/json' });
           return res.end(JSON.stringify({ error: `unsupported targetLang: ${targetLang}`, allowed: Array.from(SOUND_STREAM_TARGETS) }));
         }
-        const session = mintSession({ userId, sourceLang: src, targetLang: tgt });
+        const chosenVoice = normalizeVoice(voice);
+        const chosenTone = normalizeTone(tone);
+        const session = mintSession({ userId, sourceLang: src, targetLang: tgt, voice: chosenVoice, tone: chosenTone });
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           token: session.token,
@@ -165,6 +169,8 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           wsUrl: `${config.publicBase}/call`,
           captionsOn: captionsOn !== false,       // default true
           productionVoice: hasProductionVoice(tgt), // heads-up for the UI
+          voice: chosenVoice,
+          tone: chosenTone,
         }));
       } catch (err) {
         res.writeHead(400, { 'content-type': 'application/json' });
@@ -347,6 +353,8 @@ wss.on('connection', (ws, req) => {
           userId: sessionPayload.sub,
           sourceLang: sessionPayload.src,
           targetLang: sessionPayload.tgt,
+          voice: normalizeVoice(msg.voice || sessionPayload.voice),
+          tone: normalizeTone(msg.tone || sessionPayload.tone),
           displayName: (msg.displayName || 'anon').slice(0, 64),
           captionsOn: msg.captionsOn !== false,  // default true
           ws,
@@ -372,6 +380,8 @@ wss.on('connection', (ws, req) => {
             sourceLang: participant.sourceLang,
             targetLangs: initialTargets,
             sessionToken: msg.token,
+            voice: participant.voice,
+            tone: participant.tone,
           },
           {
             onEvent: (evt) => forwardOllalinkToRoom(client, evt),
@@ -479,6 +489,8 @@ wss.on('connection', (ws, req) => {
                 sourceLang: peerClient.session.sourceLang,
                 targetLangs: peerTargets,
                 sessionToken: '',
+                voice: peerClient.session.voice,
+                tone: peerClient.session.tone,
               },
               {
                 onEvent: (evt) => forwardOllalinkToRoom(peerClient, evt),
@@ -488,6 +500,45 @@ wss.on('connection', (ws, req) => {
             );
           }
         }
+
+        
+      if (msg.type === 'update-voice-settings') {
+        if (!client.session || !client.room) return sendErr(ws, 'not-joined', 'not in a call');
+        const newVoice = normalizeVoice(msg.voice || client.session.voice);
+        const newTone = normalizeTone(msg.tone || client.session.tone);
+        client.session.voice = newVoice;
+        client.session.tone = newTone;
+
+        // Re-open upstream Ollalink stream with the updated voice and tone
+        if (client.upstream) {
+          try { client.upstream.close(); } catch { /* ignore */ }
+        }
+        const currentTargets = computeTargets(client.room, client.session.sessionId, client.session.targetLang);
+        client.upstream = openOllalinkStream(
+          {
+            sourceLang: client.session.sourceLang,
+            targetLangs: currentTargets,
+            sessionToken: client.session.sessionId,
+            voice: newVoice,
+            tone: newTone,
+          },
+          {
+            onEvent: (evt) => forwardOllalinkToRoom(client, evt),
+            onClose: () => broadcastToOthers(client, { type: 'peer-upstream-closed', from: client.session.sessionId }),
+            onError: (err) => sendErr(client.ws, 'upstream-error', err.message),
+          }
+        );
+
+        log.info(`voice settings updated for ${client.session.displayName}: voice=${newVoice} tone=${newTone}`);
+        ws.send(JSON.stringify({ type: 'voice.settings.updated', voice: newVoice, tone: newTone }));
+        broadcastToOthers(client, {
+          type: 'peer-voice-updated',
+          sessionId: client.session.sessionId,
+          voice: newVoice,
+          tone: newTone,
+        });
+        return;
+      }
 
         // Notify peers so their UI can update the "from" mapping.
         broadcastToOthers(client, {

@@ -19,7 +19,7 @@ const testDir = join(here, '..', 'test');
 // Split into unit (no server boot) and integration (server + fake upstream).
 const UNIT = ['auth.test.js', 'rooms.test.js', 'audio_chunks.test.js',
               'captions_routing.test.js', 'realtime_protocol.test.js',
-              'regressions.test.js'];
+              'regressions.test.js', 'voice_tones.test.js'];
 const INTEGRATION = ['server.test.js', 'receive_path.test.js',
                      'rooms_deep.test.js', 'multi_target.test.js', 'deep_e2e_pipeline.test.js', 'deep_e2e_advanced.test.js', 'landing_flow_e2e.test.js', 'host_joining_deep.test.js'];
 

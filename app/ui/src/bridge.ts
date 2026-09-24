@@ -237,6 +237,17 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
       return undefined as unknown as T;
     }
 
+    case 'update_voice_settings': {
+      if (browserWs && browserWs.readyState === WebSocket.OPEN) {
+        browserWs.send(JSON.stringify({
+          type: 'update-voice-settings',
+          voice: args?.voice,
+          tone: args?.tone,
+        }));
+      }
+      return null as T;
+    }
+
     case 'change_languages': {
       if (browserWs && browserWs.readyState === WebSocket.OPEN) {
         browserWs.send(

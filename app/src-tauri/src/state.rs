@@ -114,6 +114,28 @@ impl AppState {
         }
     }
 
+    /// Update voice persona and delivery tone mid-call.
+    pub async fn update_voice_settings(
+        &self,
+        voice: Option<String>,
+        tone: Option<String>,
+    ) -> Result<()> {
+        let guard = self.active.lock().await;
+        match guard.as_ref() {
+            Some(call) => {
+                call.relay
+                    .send_json(serde_json::json!({
+                        "type": "update-voice-settings",
+                        "voice": voice,
+                        "tone": tone,
+                    }))
+                    .await
+                    .context("send update-voice-settings")
+            }
+            None => Err(anyhow!("no active call")),
+        }
+    }
+
     pub async fn swap_output_device(&self, name: Option<String>) -> Result<()> {
         let guard = self.active.lock().await;
         match guard.as_ref() {

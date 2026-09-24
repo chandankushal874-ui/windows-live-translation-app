@@ -62,7 +62,7 @@ import { config, log } from './config.js';
  * `targets` may be a single-element array for a 1:1 call, or multi-element
  * for a broadcast. Voice is selected per session, not per target.
  */
-export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', silenceMs = 600 }) {
+export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 600 }) {
   const arr = Array.isArray(targetLangs) ? targetLangs : [targetLangs];
   return JSON.stringify({
     type: 'session.configure',
@@ -71,7 +71,7 @@ export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh
     recognition: { language: sourceLang === 'auto' ? undefined : sourceLang, punctuation: true },
     endpointing: { mode: 'auto', silence_ms: silenceMs },
     translation: { enabled: true, targets: arr },
-    tts:         { enabled: true, voice },
+    tts:         tone && tone !== 'natural' ? { enabled: true, voice: voice || 'nh-m01', tone } : { enabled: true, voice: voice || 'nh-m01' },
     // Audit-side reference (server ignores unknown keys but emits a warning; that's fine)
     _meta: { session_token: sessionToken },
   });

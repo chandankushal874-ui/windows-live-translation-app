@@ -71,4 +71,10 @@ export class CallController {
     if (!this.active) return;
     await this.invoke('change_languages', { sourceLang, targetLang });
   }
+
+  /** Update voice persona and tone mid-call. Pushed to relay server. */
+  async updateVoiceSettings(voice?: string, tone?: string): Promise<void> {
+    if (!this.active) return;
+    await this.invoke('update_voice_settings', { voice, tone });
+  }
 }

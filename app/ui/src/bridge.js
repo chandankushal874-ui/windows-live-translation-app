@@ -227,6 +227,16 @@ export async function invoke(cmd, args) {
             }
             return undefined;
         }
+        case 'update_voice_settings': {
+            if (browserWs && browserWs.readyState === WebSocket.OPEN) {
+                browserWs.send(JSON.stringify({
+                    type: 'update-voice-settings',
+                    voice: args?.voice,
+                    tone: args?.tone,
+                }));
+            }
+            return null;
+        }
         case 'change_languages': {
             if (browserWs && browserWs.readyState === WebSocket.OPEN) {
                 browserWs.send(JSON.stringify({
