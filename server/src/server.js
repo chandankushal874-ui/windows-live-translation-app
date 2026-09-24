@@ -34,13 +34,11 @@ import { normalizeLang, hasProductionVoice, SOUND_STREAM_SOURCES, SOUND_STREAM_T
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
 
-  // CORS for LSP/UI handshakes during dev
-  const origin = req.headers.origin;
-  if (origin && config.allowedOrigins.includes(origin)) {
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Headers', 'content-type');
-    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  }
+  // Universal CORS for desktop WebView2, Tauri clients, and web browsers
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Headers', 'content-type, authorization, x-requested-with');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, DELETE');
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     return res.end();
