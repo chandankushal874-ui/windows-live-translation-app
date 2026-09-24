@@ -53,7 +53,7 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
       return {
         version: 1,
         displayName: `user-${Math.random().toString(36).slice(2, 6)}`,
-        relayUrl: 'ws://localhost:8787',
+        relayUrl: 'wss://windows-live-translation-app-1.onrender.com/call',
         sourceLang: 'en',
         targetLang: 'hi',
         inputDevice: null,
@@ -96,7 +96,7 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
     }
 
     case 'mint_session': {
-      const relay = String(args?.relayUrl || 'ws://localhost:8787');
+      const relay = String(args?.relayUrl || 'wss://windows-live-translation-app-1.onrender.com/call');
       const httpBase = relay.replace(/^ws(s)?:/, 'http$1:');
       try {
         const res = await fetch(`${httpBase}/api/session`, {
@@ -123,7 +123,7 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
 
     case 'start_call': {
       const callArgs = (args as any)?.args || {};
-      const relay = String(callArgs.relayUrl || 'ws://localhost:8787');
+      const relay = String(callArgs.relayUrl || 'wss://windows-live-translation-app-1.onrender.com/call');
       const wsUrl = relay.replace(/\/call\/?$/, '') + '/call';
 
       return new Promise<T>((resolve, reject) => {

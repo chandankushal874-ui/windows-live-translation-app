@@ -76,8 +76,12 @@ async function main() {
             hostNameInput.value = prefs.displayName;
             joinNameInput.value = prefs.displayName;
         }
-        if (prefs.relayUrl)
+        if (prefs.relayUrl && !prefs.relayUrl.includes('localhost') && !prefs.relayUrl.includes('127.0.0.1')) {
             relayUrl.value = prefs.relayUrl;
+        }
+        else {
+            relayUrl.value = 'https://windows-live-translation-app-1.onrender.com';
+        }
         if (prefs.sourceLang) {
             sourceLang.value = prefs.sourceLang;
             midcallSourceLang.value = prefs.sourceLang;
@@ -126,7 +130,7 @@ async function main() {
             return;
         setStatus('err', '🔴 relay offline');
         landingErrorBanner.style.display = 'flex';
-        landingErrorBanner.innerHTML = `⚠️ <strong>Relay Server is offline</strong> at <code>${base}</code>. Start it with <code>npm start</code> in <code>server/</code> or run <code>start-all.bat</code>.`;
+        landingErrorBanner.innerHTML = `⚠️ <strong>Relay Server is unreachable</strong> at <code>${base}</code>.<br><span style="font-size:12px;opacity:0.85;">If waking up from cold sleep on Render, please wait ~20s.</span>`;
     }
     probeRelayHealth();
     setInterval(probeRelayHealth, 4000);
@@ -325,7 +329,7 @@ async function main() {
             const isRelayOffline = msg.includes('offline') || msg.includes('Failed to fetch') || msg.includes('refused');
             if (isRelayOffline) {
                 landingErrorBanner.style.display = 'flex';
-                landingErrorBanner.innerHTML = `⚠️ <strong>Relay Server is offline</strong>. Please run <code>npm start</code> in the <code>server/</code> folder or run <code>start-all.bat</code>.`;
+                landingErrorBanner.innerHTML = `⚠️ <strong>Relay Server is unreachable</strong>. If waking up from cold sleep on Render, please retry in a few seconds.`;
             }
             if (requestedRoomCode) {
                 joinHint.textContent = `Failed: ${msg}`;
