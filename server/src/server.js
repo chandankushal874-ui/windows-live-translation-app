@@ -501,8 +501,20 @@ wss.on('connection', (ws, req) => {
           }
         }
 
-        
-      if (msg.type === 'update-voice-settings') {
+        // Notify peers so their UI can update the "from" mapping.
+        broadcastToOthers(client, {
+          type: 'peer-lang-changed',
+          sessionId: client.session.sessionId,
+          sourceLang: src,
+          targetLang: tgt,
+        });
+        try {
+          ws.send(JSON.stringify({ type: 'lang.changed', sourceLang: src, targetLang: tgt }));
+        } catch { /* ignore */ }
+        return;
+      }
+
+    if (msg.type === 'update-voice-settings') {
         if (!client.session || !client.room) return sendErr(ws, 'not-joined', 'not in a call');
         const newVoice = normalizeVoice(msg.voice || client.session.voice);
         const newTone = normalizeTone(msg.tone || client.session.tone);
@@ -537,19 +549,6 @@ wss.on('connection', (ws, req) => {
           voice: newVoice,
           tone: newTone,
         });
-        return;
-      }
-
-        // Notify peers so their UI can update the "from" mapping.
-        broadcastToOthers(client, {
-          type: 'peer-lang-changed',
-          sessionId: client.session.sessionId,
-          sourceLang: src,
-          targetLang: tgt,
-        });
-        try {
-          ws.send(JSON.stringify({ type: 'lang.changed', sourceLang: src, targetLang: tgt }));
-        } catch { /* ignore */ }
         return;
       }
 
@@ -590,6 +589,8 @@ function publicParticipant(p) {
     displayName: p.displayName,
     sourceLang: p.sourceLang,
     targetLang: p.targetLang,
+    voice: p.voice || 'nh-m01',
+    tone: p.tone || 'natural',
     captionsOn: p.captionsOn !== false,
     joinedAt: p.joinedAt,
   };
