@@ -164,7 +164,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           token: session.token,
           expiresAt: session.expiresAt,
           sessionId: session.sessionId,
-          wsUrl: `${config.publicBase}/call`,
+          wsUrl: `${config.publicBase.replace(/^http(s)?:/i, 'ws$1:')}/call`,
           captionsOn: captionsOn !== false,       // default true
           productionVoice: hasProductionVoice(tgt), // heads-up for the UI
           voice: chosenVoice,
