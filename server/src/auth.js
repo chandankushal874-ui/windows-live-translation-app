@@ -2,16 +2,18 @@
  * auth.js — session token minting and verification.
  *
  * Tokens are HMAC-SHA256 signed JSON blobs. They map an authenticated
- * app install to a specific user identity and a chosen source/target
- * language pair, without ever exposing the Ollalink key.
+ * app install to a specific user identity, language pair, voice persona,
+ * and delivery tone, without ever exposing the Ollalink key.
  *
  * Token payload:
  *   {
- *     "sub":  userId (string),
- *     "src":  source language code (e.g. "en"),
- *     "tgt":  target language code (e.g. "hi"),
- *     "iat":  issued-at unix seconds,
- *     "exp":  expiry unix seconds
+ *     "sub":   userId (string),
+ *     "src":   source language code (e.g. "en"),
+ *     "tgt":   target language code (e.g. "hi"),
+ *     "voice": voice persona ID (e.g. "nh-m01"),
+ *     "tone":  delivery tone (e.g. "natural"),
+ *     "iat":   issued-at unix seconds,
+ *     "exp":   expiry unix seconds
  *   }
  *
  * Wire format: base64url(json) + "." + base64url(hmac)
@@ -38,18 +40,23 @@ function hmac(data) {
 
 /**
  * Mint a new session token for a user.
- * @param {{ userId: string, sourceLang: string, targetLang: string }} args
- * @returns {{ token: string, expiresAt: number, sessionId: string }}
+ * @param {{ userId: string, sourceLang: string, targetLang: string, voice?: string, tone?: string }} args
+ * @returns {{ token: string, expiresAt: number, sessionId: string, voice: string, tone: string }}
  */
-export function mintSession({ userId, sourceLang, targetLang }) {
+export function mintSession({ userId, sourceLang, targetLang, voice = 'nh-m01', tone = 'natural' }) {
   if (!userId || !sourceLang || !targetLang) {
     throw new Error('mintSession: missing userId/sourceLang/targetLang');
   }
   const now = Math.floor(Date.now() / 1000);
+  const v = (typeof voice === 'string' && voice.trim()) ? voice.trim() : 'nh-m01';
+  const t = (typeof tone === 'string' && tone.trim()) ? tone.trim() : 'natural';
+
   const payload = {
     sub: userId,
     src: sourceLang,
     tgt: targetLang,
+    voice: v,
+    tone: t,
     sid: randomUUID(),
     iat: now,
     exp: now + config.sessionTtlSeconds,
@@ -60,6 +67,8 @@ export function mintSession({ userId, sourceLang, targetLang }) {
     token: `${body}.${sig}`,
     expiresAt: payload.exp * 1000,
     sessionId: payload.sid,
+    voice: v,
+    tone: t,
   };
 }
 
@@ -67,7 +76,7 @@ export function mintSession({ userId, sourceLang, targetLang }) {
  * Verify a token. Returns the payload on success, null on any failure.
  * Uses timing-safe comparison on the signature.
  * @param {string} token
- * @returns {{ sub: string, src: string, tgt: string, sid: string, iat: number, exp: number } | null}
+ * @returns {{ sub: string, src: string, tgt: string, voice: string, tone: string, sid: string, iat: number, exp: number } | null}
  */
 export function verifySession(token) {
   if (typeof token !== 'string' || !token.includes('.')) return null;
@@ -85,6 +94,8 @@ export function verifySession(token) {
     const now = Math.floor(Date.now() / 1000);
     if (!payload.exp || payload.exp < now) return null;
     if (!payload.sub || !payload.src || !payload.tgt || !payload.sid) return null;
+    if (!payload.voice) payload.voice = 'nh-m01';
+    if (!payload.tone) payload.tone = 'natural';
     return payload;
   } catch {
     return null;

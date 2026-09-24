@@ -21,6 +21,8 @@ async function main() {
     const displayName = $('display-name');
     const sourceLang = $('source-lang');
     const targetLang = $('target-lang');
+    const voicePersona = $('voice-persona');
+    const voiceTone = $('voice-tone');
     const inputDevice = $('input-device');
     const outputDevice = $('output-device');
     const relayUrl = $('relay-url');
@@ -46,6 +48,8 @@ async function main() {
     // Mid-Call Controls
     const midcallSourceLang = $('midcall-source-lang');
     const midcallTargetLang = $('midcall-target-lang');
+    const midcallVoicePersona = $('midcall-voice-persona');
+    const midcallVoiceTone = $('midcall-voice-tone');
     const midcallCaptionsOn = $('midcall-captions-on');
     const inputGain = $('input-gain');
     const gainReadout = $('gain-readout');
@@ -89,6 +93,14 @@ async function main() {
         if (prefs.targetLang) {
             targetLang.value = prefs.targetLang;
             midcallTargetLang.value = prefs.targetLang;
+        }
+        if (prefs.voicePersona) {
+            voicePersona.value = prefs.voicePersona;
+            midcallVoicePersona.value = prefs.voicePersona;
+        }
+        if (prefs.voiceTone) {
+            voiceTone.value = prefs.voiceTone;
+            midcallVoiceTone.value = prefs.voiceTone;
         }
         if (prefs.inputVolume != null) {
             inputGain.value = String(prefs.inputVolume);
@@ -185,6 +197,8 @@ async function main() {
             relayUrl: relayUrl.value,
             sourceLang: sourceLang.value,
             targetLang: targetLang.value,
+            voicePersona: voicePersona.value,
+            voiceTone: voiceTone.value,
             inputDevice: inputDevice.value || null,
             outputDevice: outputDevice.value || null,
             inputVolume: parseFloat(inputGain.value),
@@ -216,7 +230,7 @@ async function main() {
         joinNameInput.value = displayName.value;
         persistPrefs();
     });
-    for (const el of [relayUrl, sourceLang, targetLang, inputDevice, outputDevice, inputGain]) {
+    for (const el of [relayUrl, sourceLang, targetLang, voicePersona, voiceTone, inputDevice, outputDevice, inputGain]) {
         el.addEventListener('change', persistPrefs);
         el.addEventListener('input', persistPrefs);
     }
@@ -226,6 +240,12 @@ async function main() {
     });
     targetLang.addEventListener('change', () => {
         midcallTargetLang.value = targetLang.value;
+    });
+    voicePersona.addEventListener('change', () => {
+        midcallVoicePersona.value = voicePersona.value;
+    });
+    voiceTone.addEventListener('change', () => {
+        midcallVoiceTone.value = voiceTone.value;
     });
     // ---------- Call Orchestration & Role-Aware Banners ----------
     function switchToCallView(room, isHost) {
@@ -303,6 +323,8 @@ async function main() {
                 userId: chosenName,
                 sourceLang: sourceLang.value,
                 targetLang: targetLang.value,
+                voice: voicePersona.value,
+                tone: voiceTone.value,
             });
             const joined = await controller.startCall({
                 relayUrl: relayUrl.value,
@@ -526,6 +548,30 @@ async function main() {
             }
             catch (e) {
                 console.warn('changeLanguages:', e);
+            }
+        }
+        persistPrefs();
+    });
+    midcallVoicePersona.addEventListener('change', async () => {
+        voicePersona.value = midcallVoicePersona.value;
+        if (controller.isActive()) {
+            try {
+                await controller.updateVoiceSettings(midcallVoicePersona.value, midcallVoiceTone.value);
+            }
+            catch (e) {
+                console.warn('updateVoiceSettings:', e);
+            }
+        }
+        persistPrefs();
+    });
+    midcallVoiceTone.addEventListener('change', async () => {
+        voiceTone.value = midcallVoiceTone.value;
+        if (controller.isActive()) {
+            try {
+                await controller.updateVoiceSettings(midcallVoicePersona.value, midcallVoiceTone.value);
+            }
+            catch (e) {
+                console.warn('updateVoiceSettings:', e);
             }
         }
         persistPrefs();

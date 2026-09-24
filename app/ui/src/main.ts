@@ -26,6 +26,8 @@ interface UserPrefs {
   relayUrl: string;
   sourceLang: string;
   targetLang: string;
+  voicePersona?: string;
+  voiceTone?: string;
   inputDevice: string | null;
   outputDevice: string | null;
   inputVolume: number;
@@ -56,6 +58,8 @@ async function main() {
   const displayName = $<HTMLInputElement>('display-name');
   const sourceLang = $<HTMLSelectElement>('source-lang');
   const targetLang = $<HTMLSelectElement>('target-lang');
+  const voicePersona = $<HTMLSelectElement>('voice-persona');
+  const voiceTone = $<HTMLSelectElement>('voice-tone');
   const inputDevice = $<HTMLSelectElement>('input-device');
   const outputDevice = $<HTMLSelectElement>('output-device');
   const relayUrl = $<HTMLInputElement>('relay-url');
@@ -84,6 +88,8 @@ async function main() {
   // Mid-Call Controls
   const midcallSourceLang = $<HTMLSelectElement>('midcall-source-lang');
   const midcallTargetLang = $<HTMLSelectElement>('midcall-target-lang');
+  const midcallVoicePersona = $<HTMLSelectElement>('midcall-voice-persona');
+  const midcallVoiceTone = $<HTMLSelectElement>('midcall-voice-tone');
   const midcallCaptionsOn = $<HTMLInputElement>('midcall-captions-on');
   const inputGain = $<HTMLInputElement>('input-gain');
   const gainReadout = $('gain-readout');
@@ -130,6 +136,14 @@ async function main() {
     if (prefs.targetLang) {
       targetLang.value = prefs.targetLang;
       midcallTargetLang.value = prefs.targetLang;
+    }
+    if (prefs.voicePersona) {
+      voicePersona.value = prefs.voicePersona;
+      midcallVoicePersona.value = prefs.voicePersona;
+    }
+    if (prefs.voiceTone) {
+      voiceTone.value = prefs.voiceTone;
+      midcallVoiceTone.value = prefs.voiceTone;
     }
     if (prefs.inputVolume != null) {
       inputGain.value = String(prefs.inputVolume);
@@ -221,6 +235,8 @@ async function main() {
       relayUrl: relayUrl.value,
       sourceLang: sourceLang.value,
       targetLang: targetLang.value,
+      voicePersona: voicePersona.value,
+      voiceTone: voiceTone.value,
       inputDevice: inputDevice.value || null,
       outputDevice: outputDevice.value || null,
       inputVolume: parseFloat(inputGain.value),
@@ -251,7 +267,7 @@ async function main() {
     persistPrefs();
   });
 
-  for (const el of [relayUrl, sourceLang, targetLang, inputDevice, outputDevice, inputGain]) {
+  for (const el of [relayUrl, sourceLang, targetLang, voicePersona, voiceTone, inputDevice, outputDevice, inputGain]) {
     el.addEventListener('change', persistPrefs);
     el.addEventListener('input', persistPrefs);
   }
@@ -262,6 +278,12 @@ async function main() {
   });
   targetLang.addEventListener('change', () => {
     midcallTargetLang.value = targetLang.value;
+  });
+  voicePersona.addEventListener('change', () => {
+    midcallVoicePersona.value = voicePersona.value;
+  });
+  voiceTone.addEventListener('change', () => {
+    midcallVoiceTone.value = voiceTone.value;
   });
 
   // ---------- Call Orchestration & Role-Aware Banners ----------
@@ -346,6 +368,8 @@ async function main() {
         userId: chosenName,
         sourceLang: sourceLang.value,
         targetLang: targetLang.value,
+        voice: voicePersona.value,
+        tone: voiceTone.value,
       });
 
       const joined = await controller.startCall({
@@ -565,6 +589,30 @@ async function main() {
     if (controller.isActive()) {
       try { await controller.changeLanguages(midcallSourceLang.value, undefined); }
       catch (e) { console.warn('changeLanguages:', e); }
+    }
+    persistPrefs();
+  });
+
+  midcallVoicePersona.addEventListener('change', async () => {
+    voicePersona.value = midcallVoicePersona.value;
+    if (controller.isActive()) {
+      try {
+        await controller.updateVoiceSettings(midcallVoicePersona.value, midcallVoiceTone.value);
+      } catch (e) {
+        console.warn('updateVoiceSettings:', e);
+      }
+    }
+    persistPrefs();
+  });
+
+  midcallVoiceTone.addEventListener('change', async () => {
+    voiceTone.value = midcallVoiceTone.value;
+    if (controller.isActive()) {
+      try {
+        await controller.updateVoiceSettings(midcallVoicePersona.value, midcallVoiceTone.value);
+      } catch (e) {
+        console.warn('updateVoiceSettings:', e);
+      }
     }
     persistPrefs();
   });

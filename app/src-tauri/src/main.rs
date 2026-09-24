@@ -47,6 +47,7 @@ fn main() {
             commands::save_prefs,
             commands::set_captions,
             commands::change_languages,
+            commands::update_voice_settings,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -153,6 +154,16 @@ pub mod commands {
         target_lang: Option<String>,
     ) -> Result<(), String> {
         state.change_languages(source_lang, target_lang).await.map_err(|e| e.to_string())
+    }
+
+    /// Update voice persona and tone mid-call.
+    #[tauri::command]
+    pub async fn update_voice_settings(
+        state: State<'_, AppState>,
+        voice: Option<String>,
+        tone: Option<String>,
+    ) -> Result<(), String> {
+        state.update_voice_settings(voice, tone).await.map_err(|e| e.to_string())
     }
 
     #[derive(Debug, Serialize)]
