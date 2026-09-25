@@ -26,7 +26,9 @@ pub struct JitterPlayer {
     ring: Mutex<VecDeque<f32>>,
     /// State flag for playback prebuffering
     playing: Mutex<bool>,
-    /// Resamplers keyed by input sample rate (e.g. 48_000, 24_000 -> out_rate).
+    /// Last detected or signaled input sample rate
+    last_in_rate: Mutex<u32>,
+    /// Resamplers keyed by input sample rate (e.g. 48_000, 24_000, 16_000 -> out_rate).
     resamplers: AsyncMutex<HashMap<u32, Resampler>>,
 }
 
@@ -38,14 +40,19 @@ impl JitterPlayer {
             target_ms,
             ring: Mutex::new(VecDeque::new()),
             playing: Mutex::new(false),
+            last_in_rate: Mutex::new(ASSUMED_IN_RATE),
             resamplers: AsyncMutex::new(HashMap::new()),
         }
     }
 
-    /// Push an audio frame (either raw 48 kHz PCM s16le or 24 kHz WAV).
-    /// Automatically detects RIFF/WAVE header, extracts sample rate, skips the
-    /// header, and resamples dynamically to the output device rate.
+    /// Push an audio frame with backwards compatibility.
     pub async fn push_audio(&self, bytes: &[u8]) {
+        self.push_audio_with_rate(bytes, 0).await;
+    }
+
+    /// Push an audio frame with explicit or auto-detected sample rate.
+    /// Accurately resamples 16kHz, 24kHz, and 48kHz audio to prevent 3x speed playback.
+    pub async fn push_audio_with_rate(&self, bytes: &[u8], explicit_rate: u32) {
         if bytes.is_empty() { return; }
 
         let (in_rate, raw_pcm) = if bytes.starts_with(b"RIFF") && bytes.len() >= 44 && &bytes[8..12] == b"WAVE" {
@@ -56,9 +63,17 @@ impl JitterPlayer {
                     offset = pos + 8;
                 }
             }
-            (if rate > 0 { rate } else { 24_000 }, &bytes[offset..])
+            let valid_rate = if rate > 0 { rate } else { 24_000 };
+            *self.last_in_rate.lock() = valid_rate;
+            (valid_rate, &bytes[offset..])
         } else {
-            (ASSUMED_IN_RATE, bytes)
+            let rate = if explicit_rate > 0 {
+                *self.last_in_rate.lock() = explicit_rate;
+                explicit_rate
+            } else {
+                *self.last_in_rate.lock()
+            };
+            (rate, bytes)
         };
 
         if raw_pcm.is_empty() { return; }

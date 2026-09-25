@@ -78,6 +78,38 @@ async function main() {
             voiceSwitchLoader.style.display = 'inline-flex';
         }
     }
+    const LANG_DISPLAY_NAMES = {
+        en: 'English', hi: 'Hindi', es: 'Spanish', fr: 'French', de: 'German',
+        ja: 'Japanese', zh: 'Chinese', ru: 'Russian', pt: 'Portuguese', it: 'Italian',
+        ar: 'Arabic', kn: 'Kannada', ta: 'Tamil', te: 'Telugu', bn: 'Bengali',
+        mr: 'Marathi', gu: 'Gujarati', pa: 'Punjabi', ml: 'Malayalam', or: 'Odia', as: 'Assamese'
+    };
+    function showVoiceError(msg) {
+        if (voiceSwitchLoader && voiceSwitchText) {
+            voiceSwitchLoader.className = 'voice-switch-loader err';
+            voiceSwitchText.textContent = `⚠️ ${msg}`;
+            voiceSwitchLoader.style.display = 'inline-flex';
+            setTimeout(() => {
+                if (voiceSwitchLoader.classList.contains('err')) {
+                    voiceSwitchLoader.style.display = 'none';
+                }
+            }, 4500);
+        }
+    }
+    async function probeLanguageHealth(source, target) {
+        try {
+            const res = await fetch('/api/probe-language', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ sourceLang: source, targetLang: target }),
+            });
+            if (res.ok) {
+                return await res.json();
+            }
+        }
+        catch { }
+        return { ok: true };
+    }
     function showVoiceUpdated(msg = 'Voice Ready') {
         if (voiceSwitchLoader && voiceSwitchText) {
             voiceSwitchLoader.className = 'voice-switch-loader ready';
@@ -344,12 +376,40 @@ async function main() {
         el.addEventListener('change', persistPrefs);
         el.addEventListener('input', persistPrefs);
     }
-    // Keep landing and mid-call language dropdowns synchronized
-    sourceLang.addEventListener('change', () => {
-        midcallSourceLang.value = sourceLang.value;
+    // Keep landing and mid-call language dropdowns synchronized with probe
+    let lastSourceLang = sourceLang.value;
+    sourceLang.addEventListener('change', async () => {
+        const lang = sourceLang.value;
+        const name = LANG_DISPLAY_NAMES[lang] || lang.toUpperCase();
+        showVoiceUpdating(`Checking ${name} engine...`);
+        const probe = await probeLanguageHealth(lang, targetLang.value);
+        if (!probe.ok) {
+            showVoiceError(`${name} is under development`);
+            captions.addSystem(`⚠️ Under development: ${name} voice translation is currently in development.`);
+            sourceLang.value = lastSourceLang;
+            midcallSourceLang.value = lastSourceLang;
+            return;
+        }
+        lastSourceLang = lang;
+        midcallSourceLang.value = lang;
+        showVoiceUpdated(`${name} Ready`);
     });
-    targetLang.addEventListener('change', () => {
-        midcallTargetLang.value = targetLang.value;
+    let lastTargetLang = targetLang.value;
+    targetLang.addEventListener('change', async () => {
+        const lang = targetLang.value;
+        const name = LANG_DISPLAY_NAMES[lang] || lang.toUpperCase();
+        showVoiceUpdating(`Checking ${name} engine...`);
+        const probe = await probeLanguageHealth(sourceLang.value, lang);
+        if (!probe.ok) {
+            showVoiceError(`${name} is under development`);
+            captions.addSystem(`⚠️ Under development: ${name} voice translation is currently in development.`);
+            targetLang.value = lastTargetLang;
+            midcallTargetLang.value = lastTargetLang;
+            return;
+        }
+        lastTargetLang = lang;
+        midcallTargetLang.value = lang;
+        showVoiceUpdated(`${name} Ready`);
     });
     voicePersona.addEventListener('change', () => {
         midcallVoicePersona.value = voicePersona.value;
@@ -658,15 +718,30 @@ async function main() {
         });
     }
     midcallSourceLang.addEventListener('change', async () => {
-        sourceLang.value = midcallSourceLang.value;
-        showVoiceUpdating('Reconfiguring Speech Recognition...');
+        const lang = midcallSourceLang.value;
+        const name = LANG_DISPLAY_NAMES[lang] || lang.toUpperCase();
+        showVoiceUpdating(`Validating ${name} engine...`);
+        const probe = await probeLanguageHealth(lang, midcallTargetLang.value);
+        if (!probe.ok) {
+            showVoiceError(`${name} is under development`);
+            captions.addSystem(`⚠️ Under development: ${name} voice translation is currently in development.`);
+            midcallSourceLang.value = sourceLang.value;
+            return;
+        }
+        sourceLang.value = lang;
+        lastSourceLang = lang;
         if (controller.isActive()) {
             try {
-                await controller.changeLanguages(midcallSourceLang.value, undefined);
+                await controller.changeLanguages(lang, undefined);
+                showVoiceUpdated(`${name} Active`);
             }
             catch (e) {
                 console.warn('changeLanguages:', e);
+                showVoiceUpdated(`${name} Ready`);
             }
+        }
+        else {
+            showVoiceUpdated(`${name} Ready`);
         }
         persistPrefs();
     });
@@ -707,23 +782,33 @@ async function main() {
         persistPrefs();
     });
     midcallTargetLang.addEventListener('change', async () => {
-        targetLang.value = midcallTargetLang.value;
-        showVoiceUpdating('Re-routing Target Language Lane...');
+        const lang = midcallTargetLang.value;
+        const name = LANG_DISPLAY_NAMES[lang] || lang.toUpperCase();
+        showVoiceUpdating(`Validating ${name} engine...`);
+        const probe = await probeLanguageHealth(midcallSourceLang.value, lang);
+        if (!probe.ok) {
+            showVoiceError(`${name} is under development`);
+            captions.addSystem(`⚠️ Under development: ${name} voice translation is currently in development.`);
+            midcallTargetLang.value = targetLang.value;
+            return;
+        }
+        targetLang.value = lang;
+        lastTargetLang = lang;
         updateDiagLangPill();
         resetPipelineStageBoxes();
-        applyDiagnosis('idle', 'LANG CHANGED', `Switched to ${midcallSourceLang.value.toUpperCase()} ➔ ${midcallTargetLang.value.toUpperCase()}. Ready for speech trace.`);
+        applyDiagnosis('idle', 'LANG CHANGED', `Switched to ${midcallSourceLang.value.toUpperCase()} ➔ ${lang.toUpperCase()}. Ready for speech trace.`);
         if (controller.isActive()) {
             try {
-                await controller.changeLanguages(undefined, midcallTargetLang.value);
-                showVoiceUpdated('Language Lane Re-routed');
+                await controller.changeLanguages(undefined, lang);
+                showVoiceUpdated(`${name} Lane Active`);
             }
             catch (e) {
                 console.warn('changeLanguages:', e);
-                showVoiceUpdated('Language Lane Ready');
+                showVoiceUpdated(`${name} Ready`);
             }
         }
         else {
-            showVoiceUpdated('Target Language Set');
+            showVoiceUpdated(`${name} Ready`);
         }
         persistPrefs();
     });

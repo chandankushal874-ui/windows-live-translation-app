@@ -1033,6 +1033,12 @@ button:disabled {
   color: #6ee7b7;
 }
 
+.voice-switch-loader.err {
+  background: rgba(239, 68, 68, 0.25);
+  border-color: rgba(239, 68, 68, 0.6);
+  color: #fca5a5;
+}
+
 .spinner-circle {
   width: 10px;
   height: 10px;
