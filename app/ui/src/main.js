@@ -839,6 +839,14 @@ async function main() {
     unlistens.push(await listen('relay-event', (e) => handleRelayEvent(e.payload)));
     unlistens.push(await listen('relay-error', (e) => setStatus('err', e.payload)));
     unlistens.push(await listen('audio-error', (e) => setStatus('err', e.payload)));
+    unlistens.push(await listen('speech-active', (e) => {
+        if (e.payload) {
+            setStatus('active', '🎙️ Speaking — recording full thought...');
+        }
+        else {
+            setStatus('busy', '✨ 1.5s pause detected — translating full utterance...');
+        }
+    }));
     unlistens.push(await listen('audio-device-lost', async (e) => {
         const kind = e.payload?.kind || 'device';
         console.warn(`[audio-device-lost] ${kind} disconnected:`, e.payload?.error);

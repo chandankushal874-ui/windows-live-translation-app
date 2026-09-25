@@ -15,6 +15,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleFormat, Stream, StreamConfig};
 use parking_lot::Mutex;
 use ringbuf::{traits::*, HeapRb};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -372,6 +373,15 @@ async fn run_sender_watch(
     let mut dropped_overflow_samples: u64 = 0;
     let mut last_overflow_log = std::time::Instant::now();
 
+    // Utterance Voice Spike Segmentation:
+    // Holds 400ms pre-roll audio so initial consonants are never clipped.
+    // When a voice spike occurs, audio streams continuously.
+    // When there is NO voice spike for 1.5 seconds (1500ms), speaker has finished speaking.
+    let mut pre_roll: VecDeque<Vec<u8>> = VecDeque::with_capacity(25);
+    let mut is_speaking = false;
+    let mut last_voice_spike = std::time::Instant::now();
+    let silence_hold_duration = std::time::Duration::from_millis(1500);
+
     while running.load(Ordering::Relaxed) {
         // Pull latest consumer & sample rate on device hot-swap
         if let Ok((new_cons, new_rate)) = ring_rx.try_recv() {
@@ -415,19 +425,64 @@ async fn run_sender_watch(
         let resampled = resampler.process(&scratch)?;
         pending.extend_from_slice(&resampled);
 
-        // Pack into regular 16kHz s16le PCM frames
+        // Process equal-sized 16kHz s16le PCM frames
         while pending.len() >= frame_samples {
             let frame: Vec<f32> = pending.drain(..frame_samples).collect();
             
+            // Calculate RMS and Peak energy for voice spike detection
+            let sum_sq: f32 = frame.iter().map(|&x| x * x).sum();
+            let rms = (sum_sq / frame.len() as f32).sqrt();
+            let peak = frame.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+            let has_voice_spike = (rms >= 0.008f32) || (peak >= 0.018f32);
+
             pcm_out.clear();
             for &s in &frame {
                 let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                 pcm_out.extend_from_slice(&s16.to_le_bytes());
             }
-            if let Err(e) = relay.send_pcm(&pcm_out).await {
-                tracing::warn!(error = %e, "relay send_pcm failed");
-                break;
+
+            if !is_speaking {
+                if has_voice_spike {
+                    // Speaker has started speaking!
+                    is_speaking = true;
+                    last_voice_spike = std::time::Instant::now();
+                    let _ = app.emit("speech-active", true);
+
+                    // Flush pre-roll buffer so initial words/consonants are 100% intact
+                    while let Some(pre_frame) = pre_roll.pop_front() {
+                        let _ = relay.send_pcm(&pre_frame).await;
+                    }
+                    if let Err(e) = relay.send_pcm(&pcm_out).await {
+                        tracing::warn!(error = %e, "relay send_pcm failed");
+                        break;
+                    }
+                } else {
+                    // Keep 400ms rolling pre-roll buffer
+                    if pre_roll.len() >= 20 {
+                        pre_roll.pop_front();
+                    }
+                    pre_roll.push_back(pcm_out.clone());
+                }
+            } else {
+                // Speaker is in the middle of talking
+                if has_voice_spike {
+                    last_voice_spike = std::time::Instant::now();
+                }
+
+                if let Err(e) = relay.send_pcm(&pcm_out).await {
+                    tracing::warn!(error = %e, "relay send_pcm failed");
+                    break;
+                }
+
+                // Check if speaker has paused for 1.5 seconds (no voice spike for 1500ms)
+                if last_voice_spike.elapsed() >= silence_hold_duration {
+                    is_speaking = false;
+                    let _ = relay.send_json(serde_json::json!({ "type": "audio.commit" })).await;
+                    let _ = app.emit("speech-active", false);
+                    pre_roll.clear();
+                }
             }
+
             if pending.len() >= frame_samples {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
@@ -447,7 +502,6 @@ async fn run_sender_watch(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
 // Device enumeration
 // ---------------------------------------------------------------------------
 
