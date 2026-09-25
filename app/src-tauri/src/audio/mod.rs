@@ -1,52 +1,47 @@
-﻿//! audio/mod.rs Ã¢â‚¬â€ capture + playback pipeline.
+//! audio/mod.rs — audio pipeline wiring CPAL to the relay socket.
 //!
-//! Goals:
-//!   * Hot-path allocation-free: all PCM moves through a pre-allocated ring buffer.
-//!   * Never block the audio callback on network.
-//!   * Resample the mic input (typically 48 kHz) to 16 kHz mono s16le before send.
-//!   * Resample inbound 48 kHz audio (from Ollalink) to the output device rate.
-//!   * Support mid-call device hot-swap (drop and reopen the stream).
+//! Owns two audio streams:
+//!   - Input:  cpal input stream -> ring buffer -> Resampler -> Relay (via WS PCM frames)
+//!   - Output: Relay (via WS PCM frames) -> JitterPlayer -> cpal output stream
 //!
-//! Threading model:
-//!   * cpal pushes frames into a lock-free SPSC ring.
-//!   * A dedicated tokio task drains the ring, resamples, frames into ~20ms chunks,
-//!     and forwards to the RelaySocket.
-//!   * Inbound frames go to a playback jitter buffer; cpal output callback pops.
+//! Supports seamless hot-swapping of input/output devices mid-call without
+//! dropping the session or distorting sample rates.
 
 pub mod jitter;
 pub mod resample;
 
 use anyhow::{anyhow, Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use cpal::{Device, Host, SampleFormat, Stream, StreamConfig};
 use parking_lot::Mutex;
-use ringbuf::traits::{Consumer, Producer, Split};
-use ringbuf::HeapRb;
+use ringbuf::{traits::*, HeapRb};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
-use ringbuf::traits::Observer;
 
+use crate::ws::RelaySocket;
+use jitter::JitterPlayer;
+use resample::Resampler;
+
+/// Ring buffer size in samples. 48kHz * 2 channels * 0.5s = 48000 samples.
+const CAPTURE_RING_SAMPLES: usize = 48000;
+
+/// RAII wrapper for a cpal Stream that implements Send.
 pub struct SendStream(pub Stream);
 unsafe impl Send for SendStream {}
+
 impl std::ops::Deref for SendStream {
     type Target = Stream;
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
+
 impl std::ops::DerefMut for SendStream {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
-
-use crate::ws::RelaySocket;
-
-pub use jitter::JitterPlayer;
-pub use resample::Resampler;
-
-const CAPTURE_RING_SAMPLES: usize = 192_000;
 
 #[derive(Debug, Clone)]
 pub struct AudioPipelineConfig {
@@ -63,9 +58,8 @@ pub struct AudioPipeline {
     output_stream: Mutex<Option<SendStream>>,
 
     // The input ring is a split SPSC pair; swap_input_device signals the sender
-    // task to swap its consumer via a watch channel rather than orphaning it.
-    input_ring_tx: tokio::sync::mpsc::UnboundedSender<ringbuf::HeapCons<f32>>,
-    // Parked producer for the CURRENT input stream (used by swap to construct a fresh pair).
+    // task to swap its consumer and update the native sample rate via this channel.
+    input_ring_tx: tokio::sync::mpsc::UnboundedSender<(ringbuf::HeapCons<f32>, u32)>,
     #[allow(dead_code)]
     ring_prod_parked: Mutex<Option<ringbuf::HeapProd<f32>>>,
 
@@ -84,8 +78,7 @@ pub struct AudioPipeline {
 impl AudioPipeline {
     pub fn start(
         cfg: AudioPipelineConfig,
-        #[allow(dead_code)]
-    relay: RelaySocket,
+        relay: RelaySocket,
         app: AppHandle,
     ) -> Result<Arc<Self>> {
         let running = Arc::new(AtomicBool::new(true));
@@ -112,9 +105,7 @@ impl AudioPipeline {
             open_output_stream(cfg.output_device.as_deref(), cfg.jitter_buffer_ms, jitter.clone(), Some(app.clone()))?;
         output_stream.play().context("start output stream")?;
 
-        // Sender task: ring Ã¢â€ â€™ resample Ã¢â€ â€™ relay.
-        // Subscribes to a watch channel so swap_input_device can hand it a fresh
-        // consumer without restarting the task.
+        // Sender task: ring -> resample -> relay.
         let (ring_tx, ring_rx) = tokio::sync::mpsc::unbounded_channel();
         let sender_task = {
             let relay = relay.clone();
@@ -130,7 +121,7 @@ impl AudioPipeline {
             })
         };
 
-        // Playback task: relay Ã¢â€ â€™ jitter
+        // Playback task: relay -> jitter
         let playback_task = {
             let relay = relay.clone();
             let jitter = jitter.clone();
@@ -138,7 +129,7 @@ impl AudioPipeline {
             tokio::spawn(async move {
                 while running.load(Ordering::Relaxed) {
                     match relay.next_inbound_audio().await {
-                        Some(audio_bytes) => jitter.push_audio(&audio_bytes).await,
+                        Some(ref audio_bytes) => jitter.push_audio(audio_bytes).await,
                         None => break,
                     }
                 }
@@ -165,48 +156,33 @@ impl AudioPipeline {
         self.input_gain.store(v.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
     }
 
-    /// Gracefully stop. Blocks until playback finishes draining (max 500 ms).
+    /// Gracefully stop.
     pub async fn stop(&self) {
         self.running.store(false, Ordering::Relaxed);
 
-        // Pause capture immediately.
         if let Some(s) = self.input_stream.lock().take() {
             let _ = s.pause();
         }
-        // Signal playback to drain: close the relay audio channel by dropping
-        // the sender. The playback task will see None and exit; existing
-        // buffered audio will play out.
-        //
-        // JitterPlayer continues to serve from its internal ring Ã¢â‚¬â€ the cpal
-        // output callback will pull silence once drained.
         let playback_task = self.playback_task.lock().take();
         if let Some(t) = playback_task {
-            // Give it up to 500 ms to drain naturally; otherwise hard-abort.
             let _ = tokio::time::timeout(std::time::Duration::from_millis(500), t).await;
         }
-        // Then stop the speaker.
         if let Some(s) = self.output_stream.lock().take() {
             let _ = s.pause();
         }
-        // Finally the sender task (no more mic data anyway).
         let sender_task = self.sender_task.lock().take();
         if let Some(t) = sender_task {
             let _ = tokio::time::timeout(std::time::Duration::from_millis(200), t).await;
         }
     }
 
-    /// Hot-swap the input device mid-call. Drops the old stream, opens a new one
-    /// with a fresh ring, and signals the sender task to swap its consumer via
-    /// the watch channel. No audio loss beyond the brief device open.
+    /// Hot-swap the input device mid-call.
     pub async fn swap_input_device(&self, name: Option<String>) -> Result<()> {
-        // 1. Pause current stream
         if let Some(s) = self.input_stream.lock().take() {
             let _ = s.pause();
         }
-        // 2. Build a fresh SPSC pair. The producer goes into the new cpal callback;
-        //    the consumer will be handed to the sender task.
         let (new_prod, new_cons) = HeapRb::<f32>::new(CAPTURE_RING_SAMPLES).split();
-        let (new_stream, _rate, _ch) = open_input_stream(
+        let (new_stream, rate, _ch) = open_input_stream(
             name.as_deref().or(self.cfg.input_device.as_deref()),
             new_prod,
             self.running.clone(),
@@ -215,17 +191,12 @@ impl AudioPipeline {
         )?;
         new_stream.play().context("restart input stream")?;
 
-        // 3. Hand the new consumer to the sender task.
-        if let Err(e) = self.input_ring_tx.send(new_cons) {
-            return Err(anyhow!("sender task gone: {e}"));
-        }
         *self.input_stream.lock() = Some(SendStream(new_stream));
-        let _ = self.app.emit("device-swapped", serde_json::json!({ "kind": "input", "name": name }));
+        let _ = self.input_ring_tx.send((new_cons, rate));
         Ok(())
     }
 
-    /// Hot-swap the output device mid-call. Rebuilds the stream; playback task keeps
-    /// pushing into the same shared JitterPlayer.
+    /// Hot-swap the output device mid-call.
     pub async fn swap_output_device(&self, name: Option<String>) -> Result<()> {
         if let Some(s) = self.output_stream.lock().take() {
             let _ = s.pause();
@@ -238,46 +209,32 @@ impl AudioPipeline {
         )?;
         new_stream.play().context("restart output stream")?;
         *self.output_stream.lock() = Some(SendStream(new_stream));
-        let _ = self.app.emit("device-swapped", serde_json::json!({ "kind": "output", "name": name }));
         Ok(())
     }
-
-    #[allow(dead_code)]
-    pub fn buffered_ms(&self) -> u32 {
-        self.jitter.buffered_ms()
-    }
-}
-
-impl Drop for AudioPipeline {
-    fn drop(&mut self) {
-        self.running.store(false, Ordering::Relaxed);
-    }
 }
 
 // ---------------------------------------------------------------------------
-// Stream construction
+// Helpers for opening streams with CPAL
 // ---------------------------------------------------------------------------
 
-fn pick_input_device(host: &cpal::Host, name: Option<&str>) -> Result<Device> {
-    if let Some(want) = name {
-        if let Ok(devs) = host.input_devices() {
-            for d in devs {
-                if d.name().ok().as_deref() == Some(want) { return Ok(d); }
+fn pick_input_device(host: &Host, name: Option<&str>) -> Result<Device> {
+    if let Some(n) = name {
+        for d in host.input_devices()? {
+            if d.name().map(|nm| nm == n).unwrap_or(false) {
+                return Ok(d);
             }
         }
-        tracing::warn!("Requested input device '{want}' not found, falling back to default");
     }
     host.default_input_device().context("no default input device")
 }
 
-fn pick_output_device(host: &cpal::Host, name: Option<&str>) -> Result<Device> {
-    if let Some(want) = name {
-        if let Ok(devs) = host.output_devices() {
-            for d in devs {
-                if d.name().ok().as_deref() == Some(want) { return Ok(d); }
+fn pick_output_device(host: &Host, name: Option<&str>) -> Result<Device> {
+    if let Some(n) = name {
+        for d in host.output_devices()? {
+            if d.name().map(|nm| nm == n).unwrap_or(false) {
+                return Ok(d);
             }
         }
-        tracing::warn!("Requested output device '{want}' not found, falling back to default");
     }
     host.default_output_device().context("no default output device")
 }
@@ -321,11 +278,11 @@ fn open_input_stream(
                             let _ = ring_mut.try_push(<f32 as cpal::FromSample<$t>>::from_sample_(s) * g);
                         }
                     } else {
+                        // For stereo / array mics (Intel Smart Sound, Realtek Array),
+                        // take the primary front capsule (channel 0) to avoid destructive phase cancellation.
                         for chunk in data.chunks_exact(channels) {
-                            let sum: f32 = chunk.iter()
-                                .map(|&s| <f32 as cpal::FromSample<$t>>::from_sample_(s))
-                                .sum();
-                            let _ = ring_mut.try_push((sum / channels as f32) * g);
+                            let s = <f32 as cpal::FromSample<$t>>::from_sample_(chunk[0]);
+                            let _ = ring_mut.try_push(s * g);
                         }
                     }
                 },
@@ -357,8 +314,7 @@ fn open_output_stream(
     let channels = cfg.channels() as usize;
     let sconfig: StreamConfig = cfg.clone().into();
     let fmt = cfg.sample_format();
-
-    let _ = jitter_ms; // target buffer length is configured on the shared JitterPlayer
+    let _ = jitter_ms;
 
     let jitter_for_cb = jitter.clone();
     let app_out = app.clone();
@@ -375,8 +331,8 @@ fn open_output_stream(
         ($t:ty) => {
             device.build_output_stream(
                 &sconfig,
-                move |out: &mut [$t], _| {
-                    jitter_for_cb.fill_into(out);
+                move |data: &mut [$t], _| {
+                    jitter_for_cb.fill_into(data);
                 },
                 err_fn,
                 None,
@@ -397,16 +353,13 @@ fn open_output_stream(
 // Sender task
 // ---------------------------------------------------------------------------
 
-/// Like run_sender, but takes the consumer through a watch channel so the
-/// pipeline can swap to a different ring on device hot-swap.
 async fn run_sender_watch(
     mut ring: ringbuf::HeapCons<f32>,
-    mut ring_rx: tokio::sync::mpsc::UnboundedReceiver<ringbuf::HeapCons<f32>>,
-    in_rate: u32,
+    mut ring_rx: tokio::sync::mpsc::UnboundedReceiver<(ringbuf::HeapCons<f32>, u32)>,
+    mut in_rate: u32,
     _in_channels: usize,
     target_rate: u32,
     frame_ms: u32,
-    #[allow(dead_code)]
     relay: RelaySocket,
     app: AppHandle,
     running: Arc<AtomicBool>,
@@ -415,59 +368,60 @@ async fn run_sender_watch(
     let mut resampler = Resampler::new(in_rate, target_rate)?;
     let mut scratch = Vec::<f32>::with_capacity(frame_samples * 4);
     let mut pcm_out = Vec::<u8>::with_capacity(frame_samples * 2);
-    let mut pending: Vec<f32> = Vec::with_capacity(frame_samples);
+    let mut pending: Vec<f32> = Vec::with_capacity(frame_samples * 4);
     let mut dropped_overflow_samples: u64 = 0;
     let mut last_overflow_log = std::time::Instant::now();
-    let mut is_speaking = false;
-    let mut last_speech_time = std::time::Instant::now();
 
     while running.load(Ordering::Relaxed) {
-        // Pull the latest consumer (cheap; only re-borrowed on change).
-        if let Ok(new_cons) = ring_rx.try_recv() {
+        // Pull latest consumer & sample rate on device hot-swap
+        if let Ok((new_cons, new_rate)) = ring_rx.try_recv() {
             ring = new_cons;
+            if new_rate != in_rate {
+                tracing::info!(old = in_rate, new = new_rate, "updating resampler for swapped device");
+                in_rate = new_rate;
+                if let Ok(new_resampler) = Resampler::new(new_rate, target_rate) {
+                    resampler = new_resampler;
+                }
+            }
         }
 
         let available = ring.occupied_len();
         if available == 0 {
-            // Fast path: still sleep, but yield quickly if the ring was swapped.
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
                 maybe_new = ring_rx.recv() => {
                     match maybe_new {
-                        Some(new_cons) => { ring = new_cons; }
+                        Some((new_cons, new_rate)) => {
+                            ring = new_cons;
+                            if new_rate != in_rate {
+                                tracing::info!(old = in_rate, new = new_rate, "updating resampler for swapped device");
+                                in_rate = new_rate;
+                                if let Ok(new_resampler) = Resampler::new(new_rate, target_rate) {
+                                    resampler = new_resampler;
+                                }
+                            }
+                        }
                         None => { break; }
                     }
                 }
             }
             continue;
         }
+
         scratch.clear();
         scratch.extend(ring.pop_iter().take(available));
 
+        // Resample clean microphone stream without artificial silence muting
         let resampled = resampler.process(&scratch)?;
         pending.extend_from_slice(&resampled);
 
+        // Pack into regular 16kHz s16le PCM frames
         while pending.len() >= frame_samples {
             let frame: Vec<f32> = pending.drain(..frame_samples).collect();
             
-            // Calculate RMS energy for Noise Gate and Client-Side VAD
-            let sum_sq: f32 = frame.iter().map(|&x| x * x).sum();
-            let rms = (sum_sq / frame.len() as f32).sqrt();
-            let is_quiet = rms < 0.012f32;
-
-            if rms >= 0.018f32 {
-                is_speaking = true;
-                last_speech_time = std::time::Instant::now();
-            } else if is_quiet && is_speaking && last_speech_time.elapsed() >= std::time::Duration::from_millis(350) {
-                // Pause detected: commit partial speech instantly to eliminate 1-minute buffer latency
-                is_speaking = false;
-                let _ = relay.send_json(serde_json::json!({ "type": "audio.commit" })).await;
-            }
-
             pcm_out.clear();
             for &s in &frame {
-                let val = if is_quiet { 0.0f32 } else { s };
-                let s16 = (val.clamp(-1.0, 1.0) * 32767.0) as i16;
+                let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                 pcm_out.extend_from_slice(&s16.to_le_bytes());
             }
             if let Err(e) = relay.send_pcm(&pcm_out).await {
@@ -481,6 +435,7 @@ async fn run_sender_watch(
 
         let peak = scratch.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
         let _ = app.emit("vu-meter", peak);
+
         if last_overflow_log.elapsed().as_secs() >= 5 {
             if dropped_overflow_samples > 0 {
                 tracing::warn!(dropped = dropped_overflow_samples, "capture overflow dropped samples");
@@ -506,4 +461,3 @@ pub fn list_devices() -> Result<crate::commands::AudioDeviceList> {
         inputs, outputs, default_input, default_output,
     })
 }
-
