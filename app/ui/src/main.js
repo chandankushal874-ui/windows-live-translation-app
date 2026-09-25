@@ -839,6 +839,29 @@ async function main() {
     unlistens.push(await listen('relay-event', (e) => handleRelayEvent(e.payload)));
     unlistens.push(await listen('relay-error', (e) => setStatus('err', e.payload)));
     unlistens.push(await listen('audio-error', (e) => setStatus('err', e.payload)));
+    unlistens.push(await listen('audio-device-lost', async (e) => {
+        const kind = e.payload?.kind || 'device';
+        console.warn(`[audio-device-lost] ${kind} disconnected:`, e.payload?.error);
+        setStatus('busy', `Audio ${kind} unplugged — auto-switching to default...`);
+        setTimeout(async () => {
+            try {
+                if (kind === 'input') {
+                    await invoke('swap_input_device', { name: null });
+                }
+                else if (kind === 'output') {
+                    await invoke('swap_output_device', { name: null });
+                }
+            }
+            catch (err) {
+                console.warn(`Auto-recovery fallback failed for ${kind}:`, err);
+            }
+        }, 600);
+    }));
+    unlistens.push(await listen('device-swapped', (e) => {
+        const kind = e.payload?.kind || 'device';
+        const name = e.payload?.name || 'Default';
+        setStatus('active', `Active ${kind}: ${name}`);
+    }));
     unlistens.push(await listen('call-error', (e) => {
         console.error('call-error:', e.payload);
         const msg = e.payload?.message ?? 'error';
