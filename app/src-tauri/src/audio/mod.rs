@@ -258,20 +258,24 @@ impl Drop for AudioPipeline {
 
 fn pick_input_device(host: &cpal::Host, name: Option<&str>) -> Result<Device> {
     if let Some(want) = name {
-        for d in host.input_devices()? {
-            if d.name().ok().as_deref() == Some(want) { return Ok(d); }
+        if let Ok(devs) = host.input_devices() {
+            for d in devs {
+                if d.name().ok().as_deref() == Some(want) { return Ok(d); }
+            }
         }
-        return Err(anyhow!("input device not found: {want}"));
+        tracing::warn!("Requested input device '{want}' not found, falling back to default");
     }
     host.default_input_device().context("no default input device")
 }
 
 fn pick_output_device(host: &cpal::Host, name: Option<&str>) -> Result<Device> {
     if let Some(want) = name {
-        for d in host.output_devices()? {
-            if d.name().ok().as_deref() == Some(want) { return Ok(d); }
+        if let Ok(devs) = host.output_devices() {
+            for d in devs {
+                if d.name().ok().as_deref() == Some(want) { return Ok(d); }
+            }
         }
-        return Err(anyhow!("output device not found: {want}"));
+        tracing::warn!("Requested output device '{want}' not found, falling back to default");
     }
     host.default_output_device().context("no default output device")
 }
@@ -392,6 +396,8 @@ async fn run_sender_watch(
     let mut pending: Vec<f32> = Vec::with_capacity(frame_samples);
     let mut dropped_overflow_samples: u64 = 0;
     let mut last_overflow_log = std::time::Instant::now();
+    let mut is_speaking = false;
+    let mut last_speech_time = std::time::Instant::now();
 
     while running.load(Ordering::Relaxed) {
         // Pull the latest consumer (cheap; only re-borrowed on change).
@@ -421,9 +427,25 @@ async fn run_sender_watch(
 
         while pending.len() >= frame_samples {
             let frame: Vec<f32> = pending.drain(..frame_samples).collect();
+            
+            // Calculate RMS energy for Noise Gate and Client-Side VAD
+            let sum_sq: f32 = frame.iter().map(|&x| x * x).sum();
+            let rms = (sum_sq / frame.len() as f32).sqrt();
+            let is_quiet = rms < 0.012f32;
+
+            if rms >= 0.018f32 {
+                is_speaking = true;
+                last_speech_time = std::time::Instant::now();
+            } else if is_quiet && is_speaking && last_speech_time.elapsed() >= std::time::Duration::from_millis(350) {
+                // Pause detected: commit partial speech instantly to eliminate 1-minute buffer latency
+                is_speaking = false;
+                let _ = relay.send_json(serde_json::json!({ "type": "audio.commit" })).await;
+            }
+
             pcm_out.clear();
             for &s in &frame {
-                let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+                let val = if is_quiet { 0.0f32 } else { s };
+                let s16 = (val.clamp(-1.0, 1.0) * 32767.0) as i16;
                 pcm_out.extend_from_slice(&s16.to_le_bytes());
             }
             if let Err(e) = relay.send_pcm(&pcm_out).await {

@@ -326,7 +326,7 @@ fn spawn_session_refresh(
             let refresh_at_ms = ttl_ms * 80 / 100;
             tokio::time::sleep(std::time::Duration::from_millis(refresh_at_ms)).await;
 
-            match mint_session_via_relay(&relay_url, &user_id, &source_lang, &target_lang).await {
+            match mint_session_via_relay(&relay_url, &user_id, &source_lang, &target_lang, None, None).await {
                 Ok(new_creds) => {
                     failure_count = 0;
                     tracing::info!(new_session_id = %new_creds.session_id, "session refreshed");

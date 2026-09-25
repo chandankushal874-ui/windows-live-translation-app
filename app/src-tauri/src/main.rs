@@ -15,6 +15,21 @@ use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    // Install default crypto provider for rustls 0.23 (tokio-tungstenite WSS TLS connections)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    // Catch any panic and write to persistent log instead of hard crash
+    std::panic::set_hook(Box::new(|info| {
+        let msg = format!("PANIC: {}", info);
+        eprintln!("{}", msg);
+        if let Some(mut path) = dirs::data_dir() {
+            path.push("com.ollalink.translate");
+            let _ = std::fs::create_dir_all(&path);
+            path.push("crash.log");
+            let _ = std::fs::write(path, &msg);
+        }
+    }));
+
     // Structured logging â€” RUST_LOG env overrides the default info level.
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -48,6 +63,7 @@ fn main() {
             commands::set_captions,
             commands::change_languages,
             commands::update_voice_settings,
+            commands::check_relay_health,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -70,10 +86,19 @@ pub mod commands {
         user_id: String,
         source_lang: String,
         target_lang: String,
+        voice: Option<String>,
+        tone: Option<String>,
     ) -> Result<SessionCredentials, String> {
-        crate::ws::mint_session_via_relay(&relay_url, &user_id, &source_lang, &target_lang)
-            .await
-            .map_err(|e| e.to_string())
+        crate::ws::mint_session_via_relay(
+            &relay_url,
+            &user_id,
+            &source_lang,
+            &target_lang,
+            voice.as_deref(),
+            tone.as_deref(),
+        )
+        .await
+        .map_err(|e| e.to_string())
     }
 
     /// Start a call: join a room, open the Ollalink upstream, start audio.
@@ -164,6 +189,24 @@ pub mod commands {
         tone: Option<String>,
     ) -> Result<(), String> {
         state.update_voice_settings(voice, tone).await.map_err(|e| e.to_string())
+    }
+
+    /// Probe relay health bypassing webview CORS.
+    #[tauri::command]
+    pub async fn check_relay_health(relay_url: String) -> Result<bool, String> {
+        let base = relay_url.replace("wss://", "https://").replace("ws://", "http://");
+        let base = base.trim_end_matches("/call").trim_end_matches('/');
+        let url = format!("{}/api/health", base);
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(6))
+            .build() {
+                Ok(c) => c,
+                Err(e) => return Err(e.to_string()),
+            };
+        match client.get(&url).send().await {
+            Ok(res) => Ok(res.status().is_success()),
+            Err(_) => Ok(false),
+        }
     }
 
     #[derive(Debug, Serialize)]

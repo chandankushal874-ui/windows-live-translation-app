@@ -17,8 +17,8 @@
  *     type: "session.configure",
  *     api_key: "sk_...",
  *     audio:       { sample_rate: 16000, channels: 1, encoding: "pcm_s16le" },
- *     recognition: { language: "en", punctuation: true },
- *     endpointing: { mode: "auto", silence_ms: 600 },
+ *     recognition: { language: sourceLang === 'auto' ? undefined : sourceLang, punctuation: true },
+    endpointing: { mode: "auto", silence_ms: 600 },
  *     translation: { enabled: true, targets: ["hi"] },
  *     tts:         { enabled: true, voice: "nh-m01" }     // nh-m01 = default
  *   }
@@ -62,8 +62,27 @@ import { config, log } from './config.js';
  * `targets` may be a single-element array for a 1:1 call, or multi-element
  * for a broadcast. Voice is selected per session, not per target.
  */
-export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 600 }) {
+export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 600, wsUrl }) {
+  const url = wsUrl || config.ollalinkWsUrl || '';
   const arr = Array.isArray(targetLangs) ? targetLangs : [targetLangs];
+
+  // 1. Live-translation endpoint (gpu-live.ollalink.com / translate/stream):
+  // Format per https://ollalink.com/docs/live-translation/
+  if (url.includes('gpu-live') || url.includes('/translate/stream')) {
+    const payload = {
+      source_lang: (sourceLang === 'auto' || !sourceLang) ? undefined : sourceLang,
+      target_lang: arr[0] || 'hi',
+      sample_rate: 16000,
+    };
+    if (config.ollalinkKey) payload.api_key = config.ollalinkKey;
+    return JSON.stringify(payload);
+  }
+
+  // 2. Realtime speech endpoint (sound-stream.ollalink.com):
+  // Format per https://ollalink.com/docs/realtime-speech/
+  const chosenVoice = (typeof voice === 'string' && voice.trim()) ? voice.trim() : 'nh-m01';
+  const chosenTone = (typeof tone === 'string' && tone.trim()) ? tone.trim() : 'natural';
+
   return JSON.stringify({
     type: 'session.configure',
     api_key: config.ollalinkKey,
@@ -71,11 +90,24 @@ export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh
     recognition: { language: sourceLang === 'auto' ? undefined : sourceLang, punctuation: true },
     endpointing: { mode: 'auto', silence_ms: silenceMs },
     translation: { enabled: true, targets: arr },
-    tts:         tone && tone !== 'natural' ? { enabled: true, voice: voice || 'nh-m01', tone } : { enabled: true, voice: voice || 'nh-m01' },
-    // Audit-side reference (server ignores unknown keys but emits a warning; that's fine)
+    tts:         chosenTone && chosenTone !== 'natural'
+                   ? { enabled: true, voice: chosenVoice, tone: chosenTone }
+                   : { enabled: true, voice: chosenVoice },
     _meta: { session_token: sessionToken },
   });
 }
+
+/**
+ * Open an upstream sound-stream socket for a participant.
+ *
+ * `targetLangs` is the *array* of languages this speaker's voice should be
+ * rendered into â€” typically one entry per other participant's preference.
+ *
+ * Handlers:
+ *   onEvent(evt)   â€” normalized event from translateEvent
+ *   onClose()      â€” upstream closed (clean or error)
+ *   onError(err)   â€” transport-level error
+ */
 
 /**
  * Parse an upstream event into a normalized form. Returns null to drop.
@@ -85,8 +117,6 @@ export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh
  */
 export function translateEvent(raw) {
   if (Buffer.isBuffer(raw)) {
-    // The documented lane never sends raw binary upstream â†’ if this happens,
-    // treat as unknown binary.
     return { kind: 'unknown', payload: raw };
   }
   let parsed;
@@ -109,8 +139,6 @@ export function translateEvent(raw) {
     case 'speech.started':     return { kind: 'speech-started',  payload: parsed };
     case 'speech.ended':       return { kind: 'speech-ended',    payload: parsed };
     case 'translation.audio': {
-      // Spoken audio. Shape: { codec, sample_rate, language, chunk_seq, last, audio_b64? }
-      // 'last': true with NO audio_b64 is the end-of-utterance marker â€” keep as metadata.
       const b64 = parsed.audio_b64;
       let pcm = null;
       if (typeof b64 === 'string' && b64.length > 0) {
@@ -119,8 +147,8 @@ export function translateEvent(raw) {
       return {
         kind: 'audio',
         payload: {
-          pcm,                                  // null when this is the end marker
-          codec: parsed.codec ?? 'pcm_s16le',   // "pcm_s16le" | "wav"
+          pcm,
+          codec: parsed.codec ?? 'pcm_s16le',
           sampleRate: parsed.sample_rate ?? 48000,
           language: parsed.language ?? parsed.lang ?? '',
           chunkSeq: parsed.chunk_seq ?? 0,
@@ -137,17 +165,6 @@ export function translateEvent(raw) {
   }
 }
 
-/**
- * Open an upstream sound-stream socket for a participant.
- *
- * `targetLangs` is the *array* of languages this speaker's voice should be
- * rendered into â€” typically one entry per other participant's preference.
- *
- * Handlers:
- *   onEvent(evt)   â€” normalized event from translateEvent
- *   onClose()      â€” upstream closed (clean or error)
- *   onError(err)   â€” transport-level error
- */
 export function openOllalinkStream(args, handlers) {
   const url = config.ollalinkWsUrl;
   const targetArr = Array.isArray(args.targetLangs) ? args.targetLangs : [args.targetLangs];

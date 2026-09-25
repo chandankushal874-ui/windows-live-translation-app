@@ -92,7 +92,10 @@ impl RelaySocket {
     /// Establish the WebSocket and spawn read/write tasks.
     /// Called once at connect() and again from the reconnect loop.
     async fn open_socket(inner: Arc<RelayInner>) -> Result<()> {
-        let url = url::Url::parse(&inner.cfg.ws_url).context("parse relay ws url")?;
+        let normalized_ws = inner.cfg.ws_url
+            .replace("https://", "wss://")
+            .replace("http://", "ws://");
+        let url = url::Url::parse(&normalized_ws).context("parse relay ws url")?;
         tracing::info!(%url, "connecting to relay");
 
         let (ws_stream, _resp) = connect_async(url.as_str())
@@ -134,7 +137,7 @@ impl RelaySocket {
         // Reader task. Uses the *stable* audio_in_tx so playback is undisturbed.
         let inner_r = inner.clone();
         tokio::spawn(async move {
-            let mut expect_audio = false;
+            let mut _expect_audio = false;
             while let Some(msg) = read_half.next().await {
                 let msg = match msg {
                     Ok(m) => m,
@@ -144,14 +147,9 @@ impl RelaySocket {
                     }
                 };
                 match msg {
-                    Message::Binary(b) => {
-                        if expect_audio {
-                            expect_audio = false;
-                            let tx = inner_r.audio_in_tx.lock().await;
-                            let _ = tx.send(b);
-                        } else {
-                            tracing::debug!("binary w/o header Ã¢â‚¬â€ dropped");
-                        }
+                                        Message::Binary(b) => {
+                        let tx = inner_r.audio_in_tx.lock().await;
+                        let _ = tx.send(b);
                     }
                     Message::Text(t) => {
                         match serde_json::from_str::<ServerEvent>(&t) {
@@ -159,7 +157,7 @@ impl RelaySocket {
                                 let is_marker = end_of_utterance.unwrap_or(false);
                                 let carries_binary = has_binary.unwrap_or(!is_marker);
                                 if carries_binary {
-                                    expect_audio = true;
+                                    _expect_audio = true;
                                 }
                                 let _ = inner_r.app.emit("relay-event", ev);
                             }

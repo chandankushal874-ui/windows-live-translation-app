@@ -410,7 +410,9 @@ wss.on('connection', (ws, req) => {
             {
               sourceLang: peerClient.session.sourceLang,
               targetLangs: peerTargets,
-              sessionToken: '',
+              sessionToken: peerClient.session.sessionId || '',
+              voice: peerClient.session.voice,
+              tone: peerClient.session.tone,
             },
             {
               onEvent: (evt) => forwardOllalinkToRoom(peerClient, evt),
@@ -577,7 +579,7 @@ wss.on('connection', (ws, req) => {
     }
     client.isAlive = false;
     try { ws.ping(); } catch { /* ignore */ }
-  }, 30_000);
+  }, 5_000);
   client.heartbeat.unref?.();  // Don't keep the process alive just for pings
 });
 
@@ -648,8 +650,13 @@ function forwardOllalinkToRoom(client, evt) {
 
     for (const peer of others(client.room.code, client.session.sessionId)) {
       if (peer.ws?.readyState !== 1) continue;
-      // Route only the chunk whose output language matches the peer's preference.
-      if (p.language && peer.targetLang !== p.language) continue;
+      
+      // Check target language match (supports ISO prefixes like 'hi-IN' matching 'hi'):
+      if (p.language && peer.targetLang) {
+        const pBase = p.language.split(/[-_]/)[0].toLowerCase().trim();
+        const peerBase = peer.targetLang.split(/[-_]/)[0].toLowerCase().trim();
+        if (pBase !== peerBase) continue;
+      }
 
       try {
         peer.ws.send(JSON.stringify({
