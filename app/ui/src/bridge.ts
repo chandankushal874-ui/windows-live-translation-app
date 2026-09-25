@@ -41,7 +41,6 @@ let nextPlayTime = 0;
 // Adaptive Bitrate & VAD State
 let lastRttMs = 45;
 export function getLastRttMs(): number { return lastRttMs; }
-let abrCongested = false;
 let isSpeakingState = false;
 let lastSpeechTime = 0;
 let browserPreRoll: Int16Array[] = [];
@@ -150,18 +149,12 @@ function playInboundAudioChunk(buffer: ArrayBuffer) {
       src.connect(playbackCtx!.destination);
 
       const now = playbackCtx!.currentTime;
-      const JITTER_TARGET_LEAD = abrCongested || inboundJitterMs > 35 ? 0.120 : 0.080;
-      let isChoppy = false;
+            let isChoppy = false;
 
       if (nextPlayTime < now) {
-        if (now - nextPlayTime < 0.035) {
-          nextPlayTime = now; // Seamless catch-up without dead silence
-        } else {
-          isChoppy = true;
-          nextPlayTime = now + JITTER_TARGET_LEAD; // Prebuffer
-        }
-      } else if (nextPlayTime > now + 0.600) {
-        nextPlayTime = now + 0.120; // Bound queue latency
+        nextPlayTime = now; // Seamless playback without inserting artificial silence holes
+      } else if (nextPlayTime > now + 1.0) {
+        nextPlayTime = now + 0.050; // Bound latency if clock drifted
       }
 
       src.start(nextPlayTime);
@@ -207,18 +200,12 @@ function playInboundAudioChunk(buffer: ArrayBuffer) {
   src.connect(playbackCtx.destination);
 
   const now = playbackCtx.currentTime;
-  const JITTER_TARGET_LEAD = abrCongested || inboundJitterMs > 35 ? 0.120 : 0.080;
-  let isChoppy = false;
+    let isChoppy = false;
 
   if (nextPlayTime < now) {
-    if (now - nextPlayTime < 0.035) {
-      nextPlayTime = now; // Seamless catch-up without inserting artificial gap
-    } else {
-      isChoppy = true;
-      nextPlayTime = now + JITTER_TARGET_LEAD; // Re-prebuffer
-    }
-  } else if (nextPlayTime > now + 0.600) {
-    nextPlayTime = now + 0.120; // Resynchronize if buffer lagged behind
+    nextPlayTime = now; // Seamless playback without inserting artificial silence holes
+  } else if (nextPlayTime > now + 1.0) {
+    nextPlayTime = now + 0.050; // Bound latency if clock drifted
   }
 
   src.start(nextPlayTime);

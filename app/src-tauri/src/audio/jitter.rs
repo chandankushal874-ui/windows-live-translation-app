@@ -97,8 +97,8 @@ impl JitterPlayer {
             }
         };
 
-        // Append to ring, capping at 8x target.
-        let cap = (self.out_rate as usize) * (self.target_ms as usize) * 8 / 1000;
+        // Retain up to 30 seconds of audio. NEVER drop words or chunk bursts mid-sentence!
+        let cap = (self.out_rate as usize) * 30;
         let mut ring = self.ring.lock();
         for s in resampled {
             if ring.len() >= cap {
