@@ -44,11 +44,9 @@ export function getLastRttMs(): number { return lastRttMs; }
 let abrCongested = false;
 let isSpeakingState = false;
 let lastSpeechTime = 0;
+let browserPreRoll: Int16Array[] = [];
 
 // Equal-Sized Outbound Chunking (2560 samples = 160ms = 5120 bytes)
-const CHUNK_TARGET_SAMPLES = 2560;
-let outboundChunkBuffer: Int16Array = new Int16Array(CHUNK_TARGET_SAMPLES);
-let outboundChunkOffset = 0;
 
 // Inbound Audio Stream & Jitter Telemetry
 let totalInboundAudioChunks = 0;
@@ -271,7 +269,7 @@ async function startBrowserCapture(ws: WebSocket): Promise<void> {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const inputData = e.inputBuffer.getChannelData(0);
 
-    // 1. Calculate Peak and RMS Energy
+    // 1. Calculate Peak and RMS Energy for Voice Spike Detection
     let sumSquares = 0;
     let peak = 0;
     for (let i = 0; i < inputData.length; i++) {
@@ -282,27 +280,9 @@ async function startBrowserCapture(ws: WebSocket): Promise<void> {
     }
     const rms = Math.sqrt(sumSquares / inputData.length);
     emitBrowserEvent('vu-meter', peak);
+    const hasVoiceSpike = (rms >= 0.008) || (peak >= 0.018);
 
-    // 2. Track speaking state for UI indicators (clean VAD without premature audio cutoffs)
-    if (rms >= 0.015) {
-      if (!isSpeakingState) {
-        isSpeakingState = true;
-        currentTurnMicTime = performance.now();
-        currentTurnSendTime = 0;
-        currentTurnRecvTime = 0;
-        emitBrowserEvent('pipeline-checkpoint', {
-          stage: 'mic',
-          timestamp: currentTurnMicTime,
-        });
-        emitBrowserEvent('vad-state', { speaking: true, rms });
-      }
-      lastSpeechTime = Date.now();
-    } else if (isSpeakingState && (Date.now() - lastSpeechTime > 800)) {
-      isSpeakingState = false;
-      emitBrowserEvent('vad-state', { speaking: false, rms });
-    }
-
-    // 3. High-Quality Linear Interpolation Resampling to 16kHz s16le PCM (Preserves full voice clarity)
+    // 2. High-Quality Linear Interpolation Resampling to 16kHz s16le PCM
     const outLength = Math.round(inputData.length / ratio);
     const pcm16 = new Int16Array(outLength);
 
@@ -316,23 +296,47 @@ async function startBrowserCapture(ws: WebSocket): Promise<void> {
       pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
     }
 
-    // 4. Equal-Sized Frame Accumulator (2560 samples = 160ms = 5120 bytes)
-    for (let i = 0; i < outLength; i++) {
-      outboundChunkBuffer[outboundChunkOffset++] = pcm16[i];
-      if (outboundChunkOffset >= CHUNK_TARGET_SAMPLES) {
+    // 3. Utterance Segmentation with 1.5s Voice Spike Detection
+    const now = Date.now();
+    if (!isSpeakingState) {
+      if (hasVoiceSpike) {
+        // Speaker started speaking!
+        isSpeakingState = true;
+        lastSpeechTime = now;
+        currentTurnMicTime = performance.now();
+        currentTurnSendTime = 0;
+        emitBrowserEvent('vad-state', { speaking: true, rms });
+        emitBrowserEvent('speech-active', true);
+
+        // Flush pre-roll buffer so initial words are completely preserved
+        while (browserPreRoll.length > 0) {
+          const preBuf = browserPreRoll.shift();
+          if (preBuf) ws.send(preBuf.buffer);
+        }
+        ws.send(pcm16.buffer);
+      } else {
+        // Maintain 400ms rolling pre-roll buffer
+        if (browserPreRoll.length >= 8) {
+          browserPreRoll.shift();
+        }
+        browserPreRoll.push(pcm16);
+      }
+    } else {
+      // Actively speaking
+      if (hasVoiceSpike) {
+        lastSpeechTime = now;
+      }
+      ws.send(pcm16.buffer);
+
+      // Check if speaker has paused for 1.5 seconds (no voice spike for 1500ms)
+      if (now - lastSpeechTime >= 1500) {
+        isSpeakingState = false;
+        emitBrowserEvent('vad-state', { speaking: false, rms });
+        emitBrowserEvent('speech-active', false);
         try {
-          ws.send(outboundChunkBuffer.buffer.slice(0));
-          if (currentTurnMicTime > 0 && currentTurnSendTime === 0) {
-            currentTurnSendTime = performance.now();
-            const deltaMs = Math.round(currentTurnSendTime - currentTurnMicTime);
-            emitBrowserEvent('pipeline-checkpoint', {
-              stage: 'send',
-              timestamp: currentTurnSendTime,
-              deltaMs,
-            });
-          }
+          ws.send(JSON.stringify({ type: 'audio.commit' }));
         } catch {}
-        outboundChunkOffset = 0;
+        browserPreRoll = [];
       }
     }
   };

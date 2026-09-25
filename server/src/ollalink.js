@@ -18,7 +18,7 @@
  *     api_key: "sk_...",
  *     audio:       { sample_rate: 16000, channels: 1, encoding: "pcm_s16le" },
  *     recognition: { language: sourceLang === 'auto' ? undefined : sourceLang, punctuation: true },
-    endpointing: { mode: "auto", silence_ms: 600 },
+    endpointing: { mode: "auto", silence_ms: 1500 },
  *     translation: { enabled: true, targets: ["hi"] },
  *     tts:         { enabled: true, voice: "nh-m01" }     // nh-m01 = default
  *   }
@@ -62,7 +62,7 @@ import { config, log } from './config.js';
  * `targets` may be a single-element array for a 1:1 call, or multi-element
  * for a broadcast. Voice is selected per session, not per target.
  */
-export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 600, wsUrl }) {
+export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 1500, wsUrl }) {
   const url = wsUrl || config.ollalinkWsUrl || '';
   const arr = Array.isArray(targetLangs) ? targetLangs : [targetLangs];
 
