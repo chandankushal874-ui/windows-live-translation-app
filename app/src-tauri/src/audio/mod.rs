@@ -94,7 +94,7 @@ impl AudioPipeline {
 
         // Open initial input stream
         let (input_stream, in_rate, in_ch) =
-            open_input_stream(cfg.input_device.as_deref(), prod, running.clone(), input_gain.clone())?;
+            open_input_stream(cfg.input_device.as_deref(), prod, running.clone(), input_gain.clone(), Some(app.clone()))?;
         input_stream.play().context("start input stream")?;
 
         // Discover output device's native rate/channels before constructing the player
@@ -109,7 +109,7 @@ impl AudioPipeline {
         let jitter = Arc::new(JitterPlayer::new(out_rate, out_ch, cfg.jitter_buffer_ms));
 
         let (output_stream, _rate2, _ch2) =
-            open_output_stream(cfg.output_device.as_deref(), cfg.jitter_buffer_ms, jitter.clone())?;
+            open_output_stream(cfg.output_device.as_deref(), cfg.jitter_buffer_ms, jitter.clone(), Some(app.clone()))?;
         output_stream.play().context("start output stream")?;
 
         // Sender task: ring Ã¢â€ â€™ resample Ã¢â€ â€™ relay.
@@ -211,6 +211,7 @@ impl AudioPipeline {
             new_prod,
             self.running.clone(),
             self.input_gain.clone(),
+            Some(self.app.clone()),
         )?;
         new_stream.play().context("restart input stream")?;
 
@@ -233,6 +234,7 @@ impl AudioPipeline {
             name.as_deref().or(self.cfg.output_device.as_deref()),
             self.cfg.jitter_buffer_ms,
             self.jitter.clone(),
+            Some(self.app.clone()),
         )?;
         new_stream.play().context("restart output stream")?;
         *self.output_stream.lock() = Some(SendStream(new_stream));
@@ -285,6 +287,7 @@ fn open_input_stream(
     ring: ringbuf::HeapProd<f32>,
     running: Arc<AtomicBool>,
     gain: Arc<AtomicU32>,
+    app: Option<AppHandle>,
 ) -> Result<(Stream, u32, usize)> {
     let host = cpal::default_host();
     let device = pick_input_device(&host, name)?;
@@ -294,7 +297,16 @@ fn open_input_stream(
     let sconfig: StreamConfig = cfg.clone().into();
     let fmt = cfg.sample_format();
 
-    let err_fn = |e| tracing::error!(error=%e, "input stream error");
+    let app_in = app.clone();
+    let err_fn = move |e: cpal::StreamError| {
+        tracing::error!(error=%e, "input stream error");
+        if let Some(ref a) = app_in {
+            let _ = a.emit("audio-device-lost", serde_json::json!({
+                "kind": "input",
+                "error": e.to_string(),
+            }));
+        }
+    };
     let mut ring_mut = ring;
 
     macro_rules! build {
@@ -336,6 +348,7 @@ fn open_output_stream(
     name: Option<&str>,
     jitter_ms: u32,
     jitter: Arc<JitterPlayer>,
+    app: Option<AppHandle>,
 ) -> Result<(Stream, u32, usize)> {
     let host = cpal::default_host();
     let device = pick_output_device(&host, name)?;
@@ -348,7 +361,16 @@ fn open_output_stream(
     let _ = jitter_ms; // target buffer length is configured on the shared JitterPlayer
 
     let jitter_for_cb = jitter.clone();
-    let err_fn = |e| tracing::error!(error=%e, "output stream error");
+    let app_out = app.clone();
+    let err_fn = move |e: cpal::StreamError| {
+        tracing::error!(error=%e, "output stream error");
+        if let Some(ref a) = app_out {
+            let _ = a.emit("audio-device-lost", serde_json::json!({
+                "kind": "output",
+                "error": e.to_string(),
+            }));
+        }
+    };
     macro_rules! build {
         ($t:ty) => {
             device.build_output_stream(
