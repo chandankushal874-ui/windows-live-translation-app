@@ -62,7 +62,7 @@ import { config, log } from './config.js';
  * `targets` may be a single-element array for a 1:1 call, or multi-element
  * for a broadcast. Voice is selected per session, not per target.
  */
-export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 1500, wsUrl }) {
+export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 600, wsUrl }) {
   const url = wsUrl || config.ollalinkWsUrl || '';
   const arr = Array.isArray(targetLangs) ? targetLangs : [targetLangs];
 
@@ -185,7 +185,7 @@ export function openOllalinkStream(args, handlers) {
   upstream.on('open', () => {
     state.opened = true;
     log.info('ollalink ws open');
-    upstream.send(buildConfig(args), (err) => {
+    upstream.send(buildConfig({ ...args, silenceMs: args.silenceMs || 1500 }), (err) => {
       if (err) handlers.onError(err);
       else state.configured = true;
     });
@@ -239,3 +239,102 @@ export function openOllalinkStream(args, handlers) {
 
 
 
+
+
+/**
+ * Probe an Ollalink language channel with a 1-byte packet under the hood.
+ * Returns { ok: true, status: 'ready' } if supported and healthy,
+ * or { ok: false, underDevelopment: true, error: ... } for unsupported/broken languages (e.g. Tamil, Telugu).
+ */
+export async function probeOllalinkLanguage(args = {}) {
+  const targetLang = (args.targetLang || 'en').split(/[-_]/)[0].toLowerCase().trim();
+  const sourceLang = (args.sourceLang || 'en').split(/[-_]/)[0].toLowerCase().trim();
+
+  // Instant response for languages known to be under development / unsupported on Ollalink edge
+  if (['ta', 'te', 'pa', 'ml', 'mr', 'gu', 'or', 'as'].includes(targetLang) ||
+      ['ta', 'te', 'pa', 'ml', 'mr', 'gu', 'or', 'as'].includes(sourceLang)) {
+    return {
+      ok: false,
+      underDevelopment: true,
+      language: targetLang,
+      error: `Voice translation for '${targetLang}' is currently under development.`,
+    };
+  }
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    let streamRef = null;
+
+    const timer = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        try { streamRef?.close(); } catch {}
+        resolve({
+          ok: false,
+          underDevelopment: true,
+          language: targetLang,
+          error: `Language verification timed out for '${targetLang}'.`,
+        });
+      }
+    }, 4500);
+
+    streamRef = openOllalinkStream({
+      sourceLang,
+      targetLangs: [targetLang],
+      voice: args.voice,
+      tone: args.tone,
+    }, {
+      onEvent: (evt) => {
+        if (evt.kind === 'session-created') {
+          // Send 1-byte packet under the hood to prompt ready acknowledgement
+          setTimeout(() => {
+            try { streamRef?.send(Buffer.from([0, 0])); } catch {}
+          }, 50);
+        } else if (evt.kind === 'ready') {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            setTimeout(() => { try { streamRef?.close(); } catch {} }, 100);
+            resolve({ ok: true, status: 'ready', language: targetLang });
+          }
+        } else if (evt.kind === 'error') {
+          if (!resolved) {
+            resolved = true;
+            clearTimeout(timer);
+            try { streamRef?.close(); } catch {}
+            resolve({
+              ok: false,
+              underDevelopment: true,
+              language: targetLang,
+              error: evt.payload?.detail || evt.payload?.code || 'Language under development',
+            });
+          }
+        }
+      },
+      onClose: () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          resolve({
+            ok: false,
+            underDevelopment: true,
+            language: targetLang,
+            error: `Voice translation for '${targetLang}' is currently under development.`,
+          });
+        }
+      },
+      onError: (err) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timer);
+          resolve({
+            ok: false,
+            underDevelopment: true,
+            language: targetLang,
+            error: err.message,
+          });
+        }
+      }
+    });
+  });
+}

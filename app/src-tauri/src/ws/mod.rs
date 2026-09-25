@@ -57,8 +57,8 @@ struct RelayInner {
     /// Outbound queue. Replaced on reconnect; send_pcm clones the current sender.
     out_tx: Mutex<mpsc::UnboundedSender<Message>>,
     /// Stable inbound-audio queue. Sender is swapped on reconnect; receiver lives forever.
-    audio_in_tx: Mutex<mpsc::UnboundedSender<Vec<u8>>>,
-    audio_out_rx: Mutex<mpsc::UnboundedReceiver<Vec<u8>>>,
+    audio_in_tx: Mutex<mpsc::UnboundedSender<(Vec<u8>, u32)>>,
+    audio_out_rx: Mutex<mpsc::UnboundedReceiver<(Vec<u8>, u32)>>,
     shutdown: AtomicBool,
     reconnecting: AtomicBool,
     reconnect_notify: Notify,
@@ -67,7 +67,7 @@ struct RelayInner {
 impl RelaySocket {
     pub async fn connect(cfg: RelaySocketConfig, app: AppHandle) -> Result<Self> {
         // Stable audio channel: receiver lives for the lifetime of the socket handle.
-        let (audio_tx, audio_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        let (audio_tx, audio_rx) = mpsc::unbounded_channel::<(Vec<u8>, u32)>();
         // Provisional out_tx; replaced after first open_socket call.
         let (out_tx, _drop_rx) = mpsc::unbounded_channel::<Message>();
 
@@ -138,6 +138,7 @@ impl RelaySocket {
         let inner_r = inner.clone();
         tokio::spawn(async move {
             let mut _expect_audio = false;
+            let mut last_sample_rate: u32 = 48_000;
             while let Some(msg) = read_half.next().await {
                 let msg = match msg {
                     Ok(m) => m,
@@ -149,11 +150,14 @@ impl RelaySocket {
                 match msg {
                                         Message::Binary(b) => {
                         let tx = inner_r.audio_in_tx.lock().await;
-                        let _ = tx.send(b);
+                        let _ = tx.send((b, last_sample_rate));
                     }
                     Message::Text(t) => {
                         match serde_json::from_str::<ServerEvent>(&t) {
-                            Ok(ev @ ServerEvent::Audio { end_of_utterance, has_binary, .. }) => {
+                            Ok(ev @ ServerEvent::Audio { end_of_utterance, has_binary, sample_rate, .. }) => {
+                                if let Some(sr) = sample_rate {
+                                    if sr > 0 { last_sample_rate = sr; }
+                                }
                                 let is_marker = end_of_utterance.unwrap_or(false);
                                 let carries_binary = has_binary.unwrap_or(!is_marker);
                                 if carries_binary {
@@ -273,7 +277,7 @@ impl RelaySocket {
     }
 
     /// Await the next inbound audio frame.
-    pub async fn next_inbound_audio(&self) -> Option<Vec<u8>> {
+    pub async fn next_inbound_audio(&self) -> Option<(Vec<u8>, u32)> {
         let mut guard = self.inner.audio_out_rx.lock().await;
         guard.recv().await
     }

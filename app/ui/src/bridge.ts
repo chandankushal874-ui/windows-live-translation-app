@@ -37,6 +37,7 @@ let captureCtx: AudioContext | null = null;
 let captureProcessor: ScriptProcessorNode | null = null;
 let playbackCtx: AudioContext | null = null;
 let nextPlayTime = 0;
+let currentInboundSampleRate = 48000;
 
 // Adaptive Bitrate & VAD State
 let lastRttMs = 45;
@@ -99,7 +100,7 @@ function stopBrowserAudio() {
  * High-Precision Inbound Audio Playback with Jitter Smoothing.
  * Prevents gaps, clicks, and audio breaking when network packets arrive unevenly.
  */
-function playInboundAudioChunk(buffer: ArrayBuffer) {
+function playInboundAudioChunk(buffer: any, sampleRate?: number) {
   if (!playbackCtx || playbackCtx.state === 'closed') {
     playbackCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
   }
@@ -151,10 +152,13 @@ function playInboundAudioChunk(buffer: ArrayBuffer) {
       const now = playbackCtx!.currentTime;
             let isChoppy = false;
 
+      if (decoded.sampleRate) {
+        currentInboundSampleRate = decoded.sampleRate;
+      }
       if (nextPlayTime < now) {
         nextPlayTime = now; // Seamless playback without inserting artificial silence holes
-      } else if (nextPlayTime > now + 1.0) {
-        nextPlayTime = now + 0.050; // Bound latency if clock drifted
+      } else if (nextPlayTime > now + 15.0) {
+        nextPlayTime = now; // Clamp only if drifted far into future
       }
 
       src.start(nextPlayTime);
@@ -180,6 +184,8 @@ function playInboundAudioChunk(buffer: ArrayBuffer) {
   const numSamples = Math.floor(bytes.length / 2);
   if (numSamples === 0) return;
 
+  const effectiveRate = sampleRate || currentInboundSampleRate || 48000;
+
   const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, numSamples);
   const float32 = new Float32Array(numSamples);
   let peak = 0;
@@ -192,7 +198,7 @@ function playInboundAudioChunk(buffer: ArrayBuffer) {
 
   emitBrowserEvent('inbound-audio-energy', peak);
 
-  const audioBuf = playbackCtx.createBuffer(1, numSamples, 48000);
+  const audioBuf = playbackCtx.createBuffer(1, numSamples, effectiveRate);
   audioBuf.getChannelData(0).set(float32);
 
   const src = playbackCtx.createBufferSource();
@@ -200,12 +206,12 @@ function playInboundAudioChunk(buffer: ArrayBuffer) {
   src.connect(playbackCtx.destination);
 
   const now = playbackCtx.currentTime;
-    let isChoppy = false;
+  let isChoppy = false;
 
   if (nextPlayTime < now) {
     nextPlayTime = now; // Seamless playback without inserting artificial silence holes
-  } else if (nextPlayTime > now + 1.0) {
-    nextPlayTime = now + 0.050; // Bound latency if clock drifted
+  } else if (nextPlayTime > now + 15.0) {
+    nextPlayTime = now; // Clamp only if clock drifted unrealistically far into future
   }
 
   src.start(nextPlayTime);
@@ -485,6 +491,9 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
             if (typeof e.data === 'string') {
               try {
                 const msg = JSON.parse(e.data);
+                if (msg.type === 'audio' && typeof msg.sampleRate === 'number' && msg.sampleRate > 0) {
+                  currentInboundSampleRate = msg.sampleRate;
+                }
                 if (msg.type === 'joined' && !joinedResolved) {
                   joinedResolved = true;
                   emitBrowserEvent('call-state', 'active');

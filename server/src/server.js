@@ -26,7 +26,7 @@ import { WebSocketServer } from 'ws';
 import { config, log } from './config.js';
 import { mintSession, verifySession } from './auth.js';
 import { createRoom, getRoom, joinRoom, leaveRoom, others, roomStats, isValidRoomCode, startRoomSweeper } from './rooms.js';
-import { openOllalinkStream } from './ollalink.js';
+import { openOllalinkStream, probeOllalinkLanguage } from './ollalink.js';
 import { normalizeLang, hasProductionVoice, SOUND_STREAM_SOURCES, SOUND_STREAM_TARGETS, CAPTION_TARGETS_22, VOICE_PERSONAS, VOICE_TONES, normalizeVoice, normalizeTone } from './langs.js';
 
 // ---------- HTTP ----------
@@ -116,6 +116,24 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
       voices: Array.from(VOICE_PERSONAS),
       tones: Array.from(VOICE_TONES),
     }));
+  }
+
+  // Language Health Probe endpoint for dynamic UI validation
+  if (req.method === 'POST' && url.pathname === '/api/probe-language') {
+    let body = '';
+    req.on('data', (c) => { body += c; });
+    req.on('end', async () => {
+      try {
+        const payload = body ? JSON.parse(body) : {};
+        const result = await probeOllalinkLanguage(payload);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message }));
+      }
+    });
+    return;
   }
 
   if (req.method === 'POST' && url.pathname === '/api/session') {
@@ -467,7 +485,7 @@ wss.on('connection', (ws, req) => {
         try { client.upstream?.close(); } catch { /* ignore */ }
         const newTargets = computeTargets(client.room, client.session.sessionId, tgt);
         client.upstream = openOllalinkStream(
-          { sourceLang: src, targetLangs: newTargets, sessionToken: msg.token ?? '' },
+          { sourceLang: src, targetLangs: newTargets, sessionToken: msg.token ?? '', silenceMs: 1500 },
           {
             onEvent: (evt) => forwardOllalinkToRoom(client, evt),
             onClose: () => broadcastToOthers(client, { type: 'peer-upstream-closed', from: client.session.sessionId }),

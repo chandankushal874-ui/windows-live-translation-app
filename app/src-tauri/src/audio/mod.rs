@@ -130,7 +130,7 @@ impl AudioPipeline {
             tokio::spawn(async move {
                 while running.load(Ordering::Relaxed) {
                     match relay.next_inbound_audio().await {
-                        Some(ref audio_bytes) => jitter.push_audio(audio_bytes).await,
+                        Some((ref audio_bytes, sr)) => jitter.push_audio_with_rate(audio_bytes, sr).await,
                         None => break,
                     }
                 }
