@@ -11,16 +11,17 @@
  * the server will accept.
  */
 
-export const CAPTION_TARGETS_22 = Object.freeze([
+export const CAPTION_TARGETS_21 = Object.freeze([
   'en', 'hi', 'kn', 'ta', 'te', 'ml', 'bn', 'mr', 'gu', 'pa',
-  'or', 'as', 'ur', 'fr', 'es', 'de', 'zh', 'ar', 'ja', 'ru', 'pt', 'it',
+  'or', 'as', 'fr', 'es', 'de', 'zh', 'ar', 'ja', 'ru', 'pt', 'it',
 ]);
+export const CAPTION_TARGETS_22 = CAPTION_TARGETS_21; // backward-compat alias
 
-export const SOUND_STREAM_SOURCES = Object.freeze(['en', 'hi', 'es', 'fr']);  // + 'auto'
+export const SOUND_STREAM_SOURCES = Object.freeze(['en', 'hi', 'es', 'fr', 'kn', 'ta', 'te', 'bn']);  // + 'auto'
 export const SOUND_STREAM_TARGETS = Object.freeze([
-  'en', 'hi', 'es', 'fr', 'de', 'zh', 'ar', 'ja', 'ru', 'pt', 'it', 'kn', 'ta', 'te',
+  'en', 'hi', 'es', 'fr', 'de', 'zh', 'ar', 'ja', 'ru', 'pt', 'it', 'kn', 'ta', 'te', 'bn',
 ]);
-export const SOUND_STREAM_PRODUCTION_VOICES = Object.freeze(['en', 'hi', 'kn', 'ta']);
+export const SOUND_STREAM_PRODUCTION_VOICES = Object.freeze(['en', 'hi', 'kn', 'ta', 'te', 'bn']);
 
 /**
  * Available voice personas / characters for neural TTS audio synthesis.

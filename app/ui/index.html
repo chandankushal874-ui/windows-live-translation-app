@@ -118,6 +118,17 @@
         </details>
       </div>
 
+      <!-- Microphone Discovery & Permission Bar -->
+      <div id="mic-status-bar" class="mic-status-bar" style="margin: 0.75rem 0 1.25rem 0; display: flex; align-items: center; justify-content: space-between; background: rgba(30, 41, 59, 0.8); border: 1px solid #334155; padding: 0.65rem 1rem; border-radius: 8px;">
+        <div style="display: flex; align-items: center; gap: 0.6rem;">
+          <span id="mic-status-dot" style="width: 10px; height: 10px; border-radius: 50%; background: #f59e0b; display: inline-block;"></span>
+          <span id="mic-status-label" style="font-size: 0.88rem; color: #cbd5e1; font-weight: 500;">Microphone: Tap to enable</span>
+        </div>
+        <button id="btn-discover-mic" type="button" style="background: #2563eb; color: #fff; border: none; padding: 0.45rem 0.9rem; border-radius: 6px; font-size: 0.82rem; cursor: pointer; font-weight: 600; display: flex; align-items: center; gap: 0.4rem;">
+          🎙️ Discover &amp; Allow Mic
+        </button>
+      </div>
+
       <!-- Relay Status Alert Banner -->
       <div id="landing-error-banner" class="landing-error-banner" style="display: none;"></div>
 
@@ -294,12 +305,7 @@
           </div>
         </div>
 
-        <div class="midcall-toggles">
-          <label class="inline-checkbox">
-            <input id="midcall-captions-on" type="checkbox" checked />
-            <span>Captions</span>
-          </label>
-        </div>
+        
       </div>
 
       <!-- Main In-Call Workspace: Participants & Live Captions -->
@@ -309,12 +315,142 @@
           <ul id="participants"></ul>
         </aside>
 
-        <section class="captions-pane">
-          <div class="captions-header">
-            <h3>Live Captions & Translations</h3>
-            <span class="captions-badge">GPU Sound-Stream</span>
+        <section class="voice-stream-pane" id="voice-stream-pane">
+          <div class="voice-stream-header">
+            <div class="stream-title-group">
+              <span class="live-pulse-dot"></span>
+              <h3>Neural Voice Stream</h3>
+              <span class="stream-badge" id="stream-engine-badge">GPU Sound-Stream</span>
+              <div id="voice-switch-loader" class="voice-switch-loader" style="display: none;">
+                <span class="spinner-circle"></span>
+                <span id="voice-switch-text">Switching Voice...</span>
+              </div>
+            </div>
+            <div class="abr-pill" id="abr-status-pill" title="Adaptive Bitrate Quality Status">
+              <span class="abr-indicator optimal"></span>
+              <span id="abr-status-text">ABR: Optimal (16kHz / 48kHz HD)</span>
+              <span class="abr-latency" id="abr-latency-text">&lt; 80ms</span>
+            </div>
           </div>
-          <div id="captions-scroll" class="captions-scroll"></div>
+
+          <div class="voice-visualizer-container">
+            <!-- Outbound Local Voice Waveform & Activity -->
+            <div class="voice-channel-card outbound">
+              <div class="channel-header">
+                <div class="channel-info">
+                  <span class="channel-icon">🎙️</span>
+                  <div>
+                    <span class="channel-label">My Voice (Outbound)</span>
+                    <span class="channel-sub" id="outbound-lang-label">Speaking: English</span>
+                  </div>
+                </div>
+                <span class="activity-badge idle" id="outbound-vad-badge">Listening</span>
+              </div>
+              <div class="waveform-bars" id="outbound-waveform">
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+              </div>
+            </div>
+
+            <!-- Inbound Partner Translated Voice Waveform & Activity -->
+            <div class="voice-channel-card inbound">
+              <div class="channel-header">
+                <div class="channel-info">
+                  <span class="channel-icon">🔊</span>
+                  <div>
+                    <span class="channel-label">Partner Voice (Translated)</span>
+                    <span class="channel-sub" id="inbound-lang-label">Hearing: Hindi</span>
+                  </div>
+                </div>
+                <span class="activity-badge idle" id="inbound-vad-badge">Connected</span>
+              </div>
+              <div class="waveform-bars" id="inbound-waveform">
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Pipeline Latency & 4s Watchdog Diagnostics Panel -->
+          <div class="pipeline-diag-card" id="pipeline-diag-card">
+            <div class="diag-header-row">
+              <div class="diag-title-area">
+                <span class="diag-icon-pulse">⏱️</span>
+                <span class="diag-title-text">Pipeline Latency Watchdog</span>
+                <span class="diag-badge-watchdog" id="diag-watchdog-badge">Watchdog: 4.0s Ready</span>
+              </div>
+              <div class="diag-header-right">
+                <span class="diag-lang-pill" id="diag-lang-pill">HI ➔ EN</span>
+                <button type="button" class="btn-diag-trace" id="btn-diag-trace" title="Run instant 4s diagnostic trace">Test 4s Trace</button>
+              </div>
+            </div>
+
+            <!-- 4-Stage Stepper Flow -->
+            <div class="diag-stages-container">
+              <!-- Stage 1 -->
+              <div class="diag-stage-box" id="stage-box-mic">
+                <div class="stage-tag">Step 1</div>
+                <div class="stage-label">🎤 Mic Captured</div>
+                <div class="stage-timer-val" id="stage-mic-timer">0 ms</div>
+                <div class="stage-meter"><div class="stage-meter-fill" id="stage-mic-fill"></div></div>
+                <div class="stage-sub-status" id="stage-mic-sub">Awaiting Speech</div>
+              </div>
+              <div class="diag-stage-arrow">➔</div>
+
+              <!-- Stage 2 -->
+              <div class="diag-stage-box" id="stage-box-send">
+                <div class="stage-tag">Step 2</div>
+                <div class="stage-label">📤 Sent to API</div>
+                <div class="stage-timer-val" id="stage-send-timer">0 ms</div>
+                <div class="stage-meter"><div class="stage-meter-fill" id="stage-send-fill"></div></div>
+                <div class="stage-sub-status" id="stage-send-sub">Waiting Send</div>
+              </div>
+              <div class="diag-stage-arrow">➔</div>
+
+              <!-- Stage 3 -->
+              <div class="diag-stage-box" id="stage-box-recv">
+                <div class="stage-tag">Step 3</div>
+                <div class="stage-label">⚡ API Response</div>
+                <div class="stage-timer-val" id="stage-recv-timer">0 ms</div>
+                <div class="stage-meter"><div class="stage-meter-fill" id="stage-recv-fill"></div></div>
+                <div class="stage-sub-status" id="stage-recv-sub">Waiting Cloud</div>
+              </div>
+              <div class="diag-stage-arrow">➔</div>
+
+              <!-- Stage 4 -->
+              <div class="diag-stage-box" id="stage-box-play">
+                <div class="stage-tag">Step 4</div>
+                <div class="stage-label">🔊 Speaker Playout</div>
+                <div class="stage-timer-val" id="stage-play-timer">0 ms</div>
+                <div class="stage-meter"><div class="stage-meter-fill" id="stage-play-fill"></div></div>
+                <div class="stage-sub-status" id="stage-play-sub">Buffer Ready</div>
+              </div>
+            </div>
+
+            <!-- Root-Cause Analysis Diagnosis Banner -->
+            <div class="diag-diagnosis-banner" id="diag-diagnosis-banner">
+              <div class="diag-flag-pill" id="diag-flag-pill">IDLE</div>
+              <div class="diag-summary-text" id="diag-summary-text">Speak or change languages to trace 4-second pipeline checkpoints.</div>
+              <div class="diag-roundtrip-val" id="diag-roundtrip-val">-- ms</div>
+            </div>
+          </div>
+
+          <div class="audio-stream-footer">
+            <div class="stream-stat">
+              <span class="stat-label">Latency:</span>
+              <span class="stat-value" id="stat-latency">&lt; 150ms (Ultra-Low)</span>
+            </div>
+            <div class="stream-stat">
+              <span class="stat-label">Silence Commit (VAD):</span>
+              <span class="stat-value active" id="stat-vad">Active (350ms Pause)</span>
+            </div>
+            <div class="stream-stat">
+              <span class="stat-label">Audio Jitter Buffer:</span>
+              <span class="stat-value" id="stat-jitter">60ms Smooth Playback</span>
+            </div>
+          </div>
         </section>
       </div>
     </section>

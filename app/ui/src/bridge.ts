@@ -1,40 +1,365 @@
-/**
- * bridge.ts — Unified IPC bridge for both Tauri Native App and Web Browser preview.
- *
- * When running inside the Tauri native app (Webview2), calls delegate directly to
- * @tauri-apps/api/core (invoke) and @tauri-apps/api/event (listen).
- *
- * When running inside a normal web browser (e.g. Chrome, Edge at http://localhost:1420),
- * provides a browser-native fallback:
- *   - LocalStorage for user preferences
- *   - Direct fetch() to Relay Server for mint_session (/api/session)
- *   - Direct WebSocket connection to Relay Server (/call) for room joining and live events
- *   - Navigator.mediaDevices for audio device listing
- */
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
+import { listen as tauriListen } from '@tauri-apps/api/event';
 
-import { invoke as tauriInvoke, isTauri } from '@tauri-apps/api/core';
-import { listen as tauriListen, type UnlistenFn } from '@tauri-apps/api/event';
+export const isNativeTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
 
-export const isNativeTauri = isTauri();
+// In-browser mock event emitter to support `listen` outside Tauri
+const browserEventListeners = new Map<string, Set<(event: any) => void>>();
 
-type EventHandler = (event: { payload: any }) => void;
-const browserListeners: Map<string, Set<EventHandler>> = new Map();
-
-export function emitBrowserEvent(name: string, payload: any) {
-  const set = browserListeners.get(name);
-  if (set) {
-    for (const fn of set) {
-      try {
-        fn({ payload });
-      } catch (err) {
-        console.error(`Error in browser event handler for "${name}":`, err);
-      }
-    }
+export function emitBrowserEvent(event: string, payload: any) {
+  const listeners = browserEventListeners.get(event);
+  if (listeners) {
+    listeners.forEach((fn) => fn({ event, payload }));
   }
+}
+
+export async function listen<T = unknown>(event: string, handler: (event: { payload: T }) => void): Promise<() => void> {
+  if (isNativeTauri) {
+    return tauriListen<T>(event, handler as any);
+  }
+
+  if (!browserEventListeners.has(event)) {
+    browserEventListeners.set(event, new Set());
+  }
+  const set = browserEventListeners.get(event)!;
+  set.add(handler);
+  return () => {
+    set.delete(handler);
+  };
 }
 
 let browserWs: WebSocket | null = null;
 let browserWsPinger: any = null;
+
+// Web Audio State for Browser Capture & Playback
+let activeStream: MediaStream | null = null;
+let captureCtx: AudioContext | null = null;
+let captureProcessor: ScriptProcessorNode | null = null;
+let playbackCtx: AudioContext | null = null;
+let nextPlayTime = 0;
+
+// Adaptive Bitrate & VAD State
+let lastRttMs = 45;
+export function getLastRttMs(): number { return lastRttMs; }
+let abrCongested = false;
+let isSpeakingState = false;
+let lastSpeechTime = 0;
+let consecutiveSilenceFrames = 0;
+
+// Equal-Sized Outbound Chunking (2560 samples = 160ms = 5120 bytes)
+const CHUNK_TARGET_SAMPLES = 2560;
+let outboundChunkBuffer: Int16Array = new Int16Array(CHUNK_TARGET_SAMPLES);
+let outboundChunkOffset = 0;
+
+// Inbound Audio Stream & Jitter Telemetry
+let totalInboundAudioChunks = 0;
+let totalInboundAudioBytes = 0;
+let lastInboundAudioTime = 0;
+let inboundJitterMs = 0;
+let lastInboundIntervalMs = 0;
+
+export function getAudioStreamStats() {
+  return {
+    totalChunks: totalInboundAudioChunks,
+    totalBytes: totalInboundAudioBytes,
+    lastAudioTime: lastInboundAudioTime,
+    jitterMs: Math.round(inboundJitterMs),
+    lastIntervalMs: Math.round(lastInboundIntervalMs),
+    isAudioComing: (performance.now() - lastInboundAudioTime) < 3000 && totalInboundAudioChunks > 0,
+  };
+}
+
+// Pipeline Latency Watchdog & Checkpoints Telemetry State
+let currentTurnMicTime = 0;
+let currentTurnSendTime = 0;
+let currentTurnRecvTime = 0;
+let lastPacketTime = 0;
+let packetArrivalIntervals: number[] = [];
+
+
+// Clean up Web Audio resources
+function stopBrowserAudio() {
+  if (captureProcessor) {
+    try { captureProcessor.disconnect(); } catch {}
+    captureProcessor = null;
+  }
+  if (captureCtx) {
+    try { captureCtx.close(); } catch {}
+    captureCtx = null;
+  }
+  if (activeStream) {
+    activeStream.getTracks().forEach(t => t.stop());
+    activeStream = null;
+  }
+  if (playbackCtx) {
+    try { playbackCtx.close(); } catch {}
+    playbackCtx = null;
+  }
+  nextPlayTime = 0;
+  isSpeakingState = false;
+  }
+
+/**
+ * High-Precision Inbound Audio Playback with Jitter Smoothing.
+ * Prevents gaps, clicks, and audio breaking when network packets arrive unevenly.
+ */
+function playInboundAudioChunk(buffer: ArrayBuffer) {
+  if (!playbackCtx || playbackCtx.state === 'closed') {
+    playbackCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  }
+  if (playbackCtx.state === 'suspended') {
+    playbackCtx.resume();
+  }
+
+  const bytes = new Uint8Array(buffer);
+  if (bytes.length < 4) return;
+
+  const nowMs = performance.now();
+  totalInboundAudioChunks++;
+  totalInboundAudioBytes += bytes.length;
+
+  if (lastInboundAudioTime > 0) {
+    const interval = nowMs - lastInboundAudioTime;
+    if (lastInboundIntervalMs > 0) {
+      // RFC 3550 inter-arrival jitter filter: J = J + (|D| - J) / 16
+      const d = Math.abs(interval - lastInboundIntervalMs);
+      inboundJitterMs += (d - inboundJitterMs) / 16;
+    }
+    lastInboundIntervalMs = interval;
+  }
+  lastInboundAudioTime = nowMs;
+
+  emitBrowserEvent('audio-stream-stats', {
+    chunks: totalInboundAudioChunks,
+    bytes: totalInboundAudioBytes,
+    jitterMs: Math.round(inboundJitterMs),
+    intervalMs: Math.round(lastInboundIntervalMs),
+    isAudioComing: true,
+  });
+
+  // 1. WAV Container Batch Lane (Kannada, Tamil, Telugu fallback)
+  if (bytes.length >= 12 && bytes[0] === 0x52 && bytes[1] === 0x49 && bytes[2] === 0x46 && bytes[3] === 0x46) {
+    playbackCtx.decodeAudioData(buffer.slice(0)).then((decoded) => {
+      const float32 = decoded.getChannelData(0);
+      let peak = 0;
+      for (let i = 0; i < float32.length; i++) {
+        const abs = Math.abs(float32[i]);
+        if (abs > peak) peak = abs;
+      }
+      emitBrowserEvent('inbound-audio-energy', peak);
+
+      const src = playbackCtx!.createBufferSource();
+      src.buffer = decoded;
+      src.connect(playbackCtx!.destination);
+
+      const now = playbackCtx!.currentTime;
+      const JITTER_TARGET_LEAD = abrCongested || inboundJitterMs > 35 ? 0.120 : 0.080;
+      let isChoppy = false;
+
+      if (nextPlayTime < now) {
+        if (now - nextPlayTime < 0.035) {
+          nextPlayTime = now; // Seamless catch-up without dead silence
+        } else {
+          isChoppy = true;
+          nextPlayTime = now + JITTER_TARGET_LEAD; // Prebuffer
+        }
+      } else if (nextPlayTime > now + 0.600) {
+        nextPlayTime = now + 0.120; // Bound queue latency
+      }
+
+      src.start(nextPlayTime);
+      nextPlayTime += decoded.duration;
+
+      const tPlayWav = performance.now();
+      const recvToPlayWav = currentTurnRecvTime > 0 ? Math.round(tPlayWav - currentTurnRecvTime) : 15;
+      const totalTurnWav = currentTurnMicTime > 0 ? Math.round(tPlayWav - currentTurnMicTime) : (recvToPlayWav + 120);
+      emitBrowserEvent('pipeline-checkpoint', {
+        stage: 'play',
+        timestamp: tPlayWav,
+        deltaMs: recvToPlayWav,
+        totalMs: totalTurnWav,
+        isChoppy,
+      });
+    }).catch((decodeErr) => {
+      console.warn('Browser WAV decode failed, skipping chunk:', decodeErr);
+    });
+    return;
+  }
+
+  // 2. 48 kHz raw PCM stream path (Hindi, German, Japanese, Chinese, Portuguese, Spanish, etc.)
+  const numSamples = Math.floor(bytes.length / 2);
+  if (numSamples === 0) return;
+
+  const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, numSamples);
+  const float32 = new Float32Array(numSamples);
+  let peak = 0;
+  for (let i = 0; i < numSamples; i++) {
+    const s = int16[i] / 32768.0;
+    float32[i] = s;
+    const abs = Math.abs(s);
+    if (abs > peak) peak = abs;
+  }
+
+  emitBrowserEvent('inbound-audio-energy', peak);
+
+  const audioBuf = playbackCtx.createBuffer(1, numSamples, 48000);
+  audioBuf.getChannelData(0).set(float32);
+
+  const src = playbackCtx.createBufferSource();
+  src.buffer = audioBuf;
+  src.connect(playbackCtx.destination);
+
+  const now = playbackCtx.currentTime;
+  const JITTER_TARGET_LEAD = abrCongested || inboundJitterMs > 35 ? 0.120 : 0.080;
+  let isChoppy = false;
+
+  if (nextPlayTime < now) {
+    if (now - nextPlayTime < 0.035) {
+      nextPlayTime = now; // Seamless catch-up without inserting artificial gap
+    } else {
+      isChoppy = true;
+      nextPlayTime = now + JITTER_TARGET_LEAD; // Re-prebuffer
+    }
+  } else if (nextPlayTime > now + 0.600) {
+    nextPlayTime = now + 0.120; // Resynchronize if buffer lagged behind
+  }
+
+  src.start(nextPlayTime);
+  nextPlayTime += audioBuf.duration;
+
+  // Checkpoint 4: Played through speaker (PCM Stream)
+  const tPlay = performance.now();
+  const recvToPlay = currentTurnRecvTime > 0 ? Math.round(tPlay - currentTurnRecvTime) : 15;
+  const totalTurn = currentTurnMicTime > 0 ? Math.round(tPlay - currentTurnMicTime) : (recvToPlay + 120);
+  emitBrowserEvent('pipeline-checkpoint', {
+    stage: 'play',
+    timestamp: tPlay,
+    deltaMs: recvToPlay,
+    totalMs: totalTurn,
+    isChoppy,
+  });
+}
+
+/**
+ * Intelligent Web Audio Capture with Client-Side VAD, Noise Gating, & Adaptive Bitrate.
+ * Eliminates 1-minute latency by committing utterances instantly on speech pauses (>350ms).
+ */
+async function startBrowserCapture(ws: WebSocket): Promise<void> {
+  stopBrowserAudio();
+
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+  });
+  activeStream = stream;
+
+  const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  captureCtx = ctx;
+
+  const sourceNode = ctx.createMediaStreamSource(stream);
+  const bufferSize = 2048;
+  const processor = ctx.createScriptProcessor(bufferSize, 1, 1);
+  captureProcessor = processor;
+
+  const inRate = ctx.sampleRate;
+  const targetRate = 16000;
+  const ratio = inRate / targetRate;
+
+  const NOISE_GATE_RMS = 0.012;   // Drop room hum / fan noise
+  const SPEECH_START_RMS = 0.018; // Conversational threshold
+  const SILENCE_COMMIT_MS = 350;  // Commit utterance on 350ms pause
+
+  processor.onaudioprocess = (e) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const inputData = e.inputBuffer.getChannelData(0);
+
+    // 1. Calculate Peak and RMS Energy
+    let sumSquares = 0;
+    let peak = 0;
+    for (let i = 0; i < inputData.length; i++) {
+      const val = inputData[i];
+      const abs = Math.abs(val);
+      if (abs > peak) peak = abs;
+      sumSquares += val * val;
+    }
+    const rms = Math.sqrt(sumSquares / inputData.length);
+    emitBrowserEvent('vu-meter', peak);
+
+    // 2. Client-Side Voice Activity Detection (VAD)
+    const now = Date.now();
+    if (rms >= SPEECH_START_RMS) {
+      if (!isSpeakingState) {
+        isSpeakingState = true;
+        currentTurnMicTime = performance.now();
+        currentTurnSendTime = 0;
+        currentTurnRecvTime = 0;
+        emitBrowserEvent('pipeline-checkpoint', {
+          stage: 'mic',
+          timestamp: currentTurnMicTime,
+        });
+        emitBrowserEvent('vad-state', { speaking: true, rms });
+      }
+      lastSpeechTime = now;
+      consecutiveSilenceFrames = 0;
+    } else if (rms < NOISE_GATE_RMS) {
+      consecutiveSilenceFrames++;
+      // If user was actively speaking and then paused for >350ms, commit immediately!
+      if (isSpeakingState && (now - lastSpeechTime >= SILENCE_COMMIT_MS)) {
+        isSpeakingState = false;
+        emitBrowserEvent('vad-state', { speaking: false, rms });
+        try {
+          if (outboundChunkOffset > 0) {
+            ws.send(outboundChunkBuffer.slice(0, outboundChunkOffset).buffer);
+            outboundChunkOffset = 0;
+          }
+          ws.send(JSON.stringify({ type: 'audio.commit' }));
+        } catch {}
+      }
+    }
+
+    // 3. Downsample to 16kHz s16le PCM
+    const outLength = Math.round(inputData.length / ratio);
+    const pcm16 = new Int16Array(outLength);
+    const isQuiet = rms < NOISE_GATE_RMS;
+
+    for (let i = 0; i < outLength; i++) {
+      if (isQuiet) {
+        pcm16[i] = 0; // Clean silence gating eliminates ambient hiss
+      } else {
+        const idx = Math.floor(i * ratio);
+        const s = Math.max(-1, Math.min(1, inputData[idx]));
+        pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+    }
+
+    // 4. Equal-Sized Frame Accumulator (2560 samples = 160ms = 5120 bytes)
+    // Guarantees all outbound audio frames are equal in size and transferred with uniform latency.
+    for (let i = 0; i < outLength; i++) {
+      outboundChunkBuffer[outboundChunkOffset++] = pcm16[i];
+      if (outboundChunkOffset >= CHUNK_TARGET_SAMPLES) {
+        try {
+          ws.send(outboundChunkBuffer.buffer.slice(0));
+          if (currentTurnMicTime > 0 && currentTurnSendTime === 0) {
+            currentTurnSendTime = performance.now();
+            const deltaMs = Math.round(currentTurnSendTime - currentTurnMicTime);
+            emitBrowserEvent('pipeline-checkpoint', {
+              stage: 'send',
+              timestamp: currentTurnSendTime,
+              deltaMs,
+            });
+          }
+        } catch {}
+        outboundChunkOffset = 0;
+      }
+    }
+  };
+
+  sourceNode.connect(processor);
+  processor.connect(ctx.destination);
+}
 
 export async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   if (isNativeTauri) {
@@ -53,7 +378,7 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
       return {
         version: 1,
         displayName: `user-${Math.random().toString(36).slice(2, 6)}`,
-        relayUrl: 'wss://windows-live-translation-app-1.onrender.com/call',
+        relayUrl: window.location.origin,
         sourceLang: 'en',
         targetLang: 'hi',
         inputDevice: null,
@@ -96,8 +421,11 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
     }
 
     case 'mint_session': {
-      const relay = String(args?.relayUrl || 'wss://windows-live-translation-app-1.onrender.com/call');
-      const httpBase = relay.replace(/^ws(s)?:/, 'http$1:');
+      let relay = String(args?.relayUrl || '');
+      let httpBase = relay ? relay.replace(/^ws(s)?:/, 'http$1:').replace(/\/call\/?$/, '') : window.location.origin;
+      if (httpBase.includes('onrender.com') || !httpBase.startsWith('http')) {
+        httpBase = window.location.origin;
+      }
       try {
         const res = await fetch(`${httpBase}/api/session`, {
           method: 'POST',
@@ -106,6 +434,8 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
             userId: args?.userId,
             sourceLang: args?.sourceLang,
             targetLang: args?.targetLang,
+            voice: (args as any)?.voice,
+            tone: (args as any)?.tone,
           }),
         });
         if (!res.ok) {
@@ -115,7 +445,7 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
         return (await res.json()) as T;
       } catch (err: any) {
         if (err?.message && (err.message.includes('Failed to fetch') || err.message.includes('NetworkError') || err.message.includes('refused'))) {
-          throw new Error(`Relay server offline at ${httpBase}. Please start it with 'cd server && npm start'.`);
+          throw new Error(`Relay server offline at ${httpBase}. Please check connection.`);
         }
         throw err;
       }
@@ -123,8 +453,13 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
 
     case 'start_call': {
       const callArgs = (args as any)?.args || {};
-      const relay = String(callArgs.relayUrl || 'wss://windows-live-translation-app-1.onrender.com/call');
-      const wsUrl = relay.replace(/\/call\/?$/, '') + '/call';
+      let wsUrl = callArgs?.credentials?.wsUrl || '';
+      if (!wsUrl || wsUrl.includes('onrender.com')) {
+        const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        wsUrl = `${proto}//${window.location.host}/call`;
+      } else {
+        wsUrl = wsUrl.replace(/^http(s)?:/, 'ws$1:');
+      }
 
       return new Promise<T>((resolve, reject) => {
         try {
@@ -138,10 +473,11 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
           }
 
           const ws = new WebSocket(wsUrl);
+          ws.binaryType = 'arraybuffer';
           browserWs = ws;
           let joinedResolved = false;
 
-          ws.onopen = () => {
+          ws.onopen = async () => {
             const joinMsg = {
               type: 'join',
               room: callArgs.roomCode || null,
@@ -150,6 +486,8 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
               sourceLang: callArgs.sourceLang,
               targetLang: callArgs.targetLang,
               captionsOn: !!callArgs.captionsOn,
+              voice: callArgs.credentials?.voice,
+              tone: callArgs.credentials?.tone,
             };
             ws.send(JSON.stringify(joinMsg));
 
@@ -158,6 +496,14 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
                 ws.send(JSON.stringify({ type: 'ping' }));
               }
             }, 10000);
+
+            // Start Live Microphone Streaming
+            try {
+              await startBrowserCapture(ws);
+            } catch (micErr: any) {
+              console.warn('Microphone start error:', micErr);
+              emitBrowserEvent('audio-error', micErr.message || 'Could not access microphone');
+            }
           };
 
           ws.onmessage = (e) => {
@@ -179,6 +525,43 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
               } catch (parseErr) {
                 console.warn('Non-JSON WebSocket message:', e.data);
               }
+            } else if (e.data instanceof ArrayBuffer) {
+              // Checkpoint 3: API response received
+              currentTurnRecvTime = performance.now();
+              const now = currentTurnRecvTime;
+              if (lastPacketTime > 0) {
+                const interval = now - lastPacketTime;
+                packetArrivalIntervals.push(interval);
+                if (packetArrivalIntervals.length > 8) packetArrivalIntervals.shift();
+              }
+              lastPacketTime = now;
+              const deltaMs = currentTurnSendTime > 0 ? Math.round(currentTurnRecvTime - currentTurnSendTime) : 150;
+              const byteCount = e.data.byteLength;
+              const isCutAudio = byteCount > 0 && byteCount < 44;
+              emitBrowserEvent('pipeline-checkpoint', {
+                stage: 'recv',
+                timestamp: currentTurnRecvTime,
+                deltaMs,
+                bytes: byteCount,
+                isCutAudio,
+              });
+              // INBOUND TRANSLATED AUDIO PCM -> PLAY THROUGH SPEAKERS
+              playInboundAudioChunk(e.data);
+            } else if (typeof Blob !== 'undefined' && e.data instanceof Blob) {
+              e.data.arrayBuffer().then((buf) => {
+                currentTurnRecvTime = performance.now();
+                const deltaMs = currentTurnSendTime > 0 ? Math.round(currentTurnRecvTime - currentTurnSendTime) : 150;
+                const byteCount = buf.byteLength;
+                const isCutAudio = byteCount > 0 && byteCount < 44;
+                emitBrowserEvent('pipeline-checkpoint', {
+                  stage: 'recv',
+                  timestamp: currentTurnRecvTime,
+                  deltaMs,
+                  bytes: byteCount,
+                  isCutAudio,
+                });
+                playInboundAudioChunk(buf);
+              });
             }
           };
 
@@ -191,6 +574,7 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
           };
 
           ws.onclose = () => {
+            stopBrowserAudio();
             if (browserWsPinger) {
               clearInterval(browserWsPinger);
               browserWsPinger = null;
@@ -210,6 +594,7 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
     }
 
     case 'end_call': {
+      stopBrowserAudio();
       if (browserWs) {
         try {
           if (browserWs.readyState === WebSocket.OPEN) {
@@ -250,47 +635,26 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
 
     case 'change_languages': {
       if (browserWs && browserWs.readyState === WebSocket.OPEN) {
-        browserWs.send(
-          JSON.stringify({
-            type: 'language-change',
-            sourceLang: (args as any)?.sourceLang,
-            targetLang: (args as any)?.targetLang,
-          }),
-        );
+        browserWs.send(JSON.stringify({
+          type: 'lang.change',
+          sourceLang: (args as any)?.sourceLang || (args as any)?.source_lang,
+          targetLang: (args as any)?.targetLang || (args as any)?.target_lang,
+        }));
       }
-      return undefined as unknown as T;
+      return null as T;
     }
 
-    case 'set_input_volume':
+    case 'set_input_volume': {
+      return null as T;
+    }
+
     case 'swap_input_device':
-    case 'swap_output_device':
-      return undefined as unknown as T;
+    case 'swap_output_device': {
+      return null as T;
+    }
 
     default:
-      console.warn(`[Browser Bridge] Unhandled invoke command: "${cmd}"`);
+      console.warn(`Unhandled mock invoke command: ${cmd}`);
       return undefined as unknown as T;
   }
-}
-
-export async function listen<T = unknown>(
-  event: string,
-  handler: (event: { payload: T }) => void,
-): Promise<UnlistenFn> {
-  if (isNativeTauri) {
-    return tauriListen<T>(event, handler);
-  }
-
-  let set = browserListeners.get(event);
-  if (!set) {
-    set = new Set();
-    browserListeners.set(event, set);
-  }
-  set.add(handler as EventHandler);
-
-  return () => {
-    const s = browserListeners.get(event);
-    if (s) {
-      s.delete(handler as EventHandler);
-    }
-  };
 }

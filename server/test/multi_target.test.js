@@ -206,7 +206,7 @@ test('config message includes multi-target array when peer set changes', async (
   const bob = await join('bob', 'hi', 'en', alice.roomCode);
   await new Promise(r => setTimeout(r, 300));
   // Find bob's fake session — it's the newest one that has recognition.language='hi'
-  const bobFake = fakeSessions
+    const bobFake = fakeSessions
     .slice(fakeBefore + 1)  // skip alice's initial session
     .find(s => {
       const cfg = JSON.parse(s.received.find(m => !m.isBinary)?.data?.toString() || '{}');

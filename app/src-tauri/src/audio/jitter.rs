@@ -24,6 +24,8 @@ pub struct JitterPlayer {
     target_ms: u32,
     /// Buffered samples (already resampled to out_rate, mono).
     ring: Mutex<VecDeque<f32>>,
+    /// State flag for playback prebuffering
+    playing: Mutex<bool>,
     /// Resamplers keyed by input sample rate (e.g. 48_000, 24_000 -> out_rate).
     resamplers: AsyncMutex<HashMap<u32, Resampler>>,
 }
@@ -35,6 +37,7 @@ impl JitterPlayer {
             out_channels: out_channels.max(1),
             target_ms,
             ring: Mutex::new(VecDeque::new()),
+            playing: Mutex::new(false),
             resamplers: AsyncMutex::new(HashMap::new()),
         }
     }
@@ -81,7 +84,11 @@ impl JitterPlayer {
                     }
                 }
             }
-            match map.get_mut(&in_rate).unwrap().process(&samples) {
+            let resampler = match map.get_mut(&in_rate) {
+                Some(r) => r,
+                None => return,
+            };
+            match resampler.process(&samples) {
                 Ok(v) => v,
                 Err(e) => {
                     tracing::error!(error=%e, in_rate, "jitter resample failed");
@@ -113,23 +120,36 @@ impl JitterPlayer {
         let mut ring = self.ring.lock();
         let target_len = (self.out_rate as usize) * (self.target_ms as usize) / 1000;
 
-        // Don't start playing until we've accumulated the target buffer (prebuffer).
-        if ring.len() < target_len {
-            for s in out.iter_mut() { *s = <T as cpal::FromSample<f32>>::from_sample_(0.0); }
-            return;
+        let mut playing = self.playing.lock();
+
+        // Gating only occurs before playback starts (pre-buffer)
+        if !*playing {
+            if ring.len() >= target_len {
+                *playing = true;
+            } else {
+                for s in out.iter_mut() { *s = <T as cpal::FromSample<f32>>::from_sample_(0.0); }
+                return;
+            }
         }
 
         let ch = self.out_channels;
         let mut i = 0;
         while i < needed {
-            let next = ring.pop_front().unwrap_or(0.0);
-            // Duplicate mono sample across channels
-            for c in 0..ch {
-                if i + c < needed {
-                    out[i + c] = <T as cpal::FromSample<f32>>::from_sample_(next);
+            if let Some(next) = ring.pop_front() {
+                for c in 0..ch {
+                    if i + c < needed {
+                        out[i + c] = <T as cpal::FromSample<f32>>::from_sample_(next);
+                    }
                 }
+                i += ch;
+            } else {
+                *playing = false;
+                while i < needed {
+                    out[i] = <T as cpal::FromSample<f32>>::from_sample_(0.0);
+                    i += 1;
+                }
+                break;
             }
-            i += ch;
         }
     }
 
