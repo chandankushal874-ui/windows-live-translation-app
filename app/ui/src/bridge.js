@@ -36,7 +36,6 @@ export function getLastRttMs() { return lastRttMs; }
 let abrCongested = false;
 let isSpeakingState = false;
 let lastSpeechTime = 0;
-let consecutiveSilenceFrames = 0;
 // Equal-Sized Outbound Chunking (2560 samples = 160ms = 5120 bytes)
 const CHUNK_TARGET_SAMPLES = 2560;
 let outboundChunkBuffer = new Int16Array(CHUNK_TARGET_SAMPLES);
@@ -245,9 +244,6 @@ async function startBrowserCapture(ws) {
     const inRate = ctx.sampleRate;
     const targetRate = 16000;
     const ratio = inRate / targetRate;
-    const NOISE_GATE_RMS = 0.012; // Drop room hum / fan noise
-    const SPEECH_START_RMS = 0.018; // Conversational threshold
-    const SILENCE_COMMIT_MS = 350; // Commit utterance on 350ms pause
     processor.onaudioprocess = (e) => {
         if (!ws || ws.readyState !== WebSocket.OPEN)
             return;
@@ -264,9 +260,8 @@ async function startBrowserCapture(ws) {
         }
         const rms = Math.sqrt(sumSquares / inputData.length);
         emitBrowserEvent('vu-meter', peak);
-        // 2. Client-Side Voice Activity Detection (VAD)
-        const now = Date.now();
-        if (rms >= SPEECH_START_RMS) {
+        // 2. Track speaking state for UI indicators (clean VAD without premature audio cutoffs)
+        if (rms >= 0.015) {
             if (!isSpeakingState) {
                 isSpeakingState = true;
                 currentTurnMicTime = performance.now();
@@ -278,41 +273,25 @@ async function startBrowserCapture(ws) {
                 });
                 emitBrowserEvent('vad-state', { speaking: true, rms });
             }
-            lastSpeechTime = now;
-            consecutiveSilenceFrames = 0;
+            lastSpeechTime = Date.now();
         }
-        else if (rms < NOISE_GATE_RMS) {
-            consecutiveSilenceFrames++;
-            // If user was actively speaking and then paused for >350ms, commit immediately!
-            if (isSpeakingState && (now - lastSpeechTime >= SILENCE_COMMIT_MS)) {
-                isSpeakingState = false;
-                emitBrowserEvent('vad-state', { speaking: false, rms });
-                try {
-                    if (outboundChunkOffset > 0) {
-                        ws.send(outboundChunkBuffer.slice(0, outboundChunkOffset).buffer);
-                        outboundChunkOffset = 0;
-                    }
-                    ws.send(JSON.stringify({ type: 'audio.commit' }));
-                }
-                catch { }
-            }
+        else if (isSpeakingState && (Date.now() - lastSpeechTime > 800)) {
+            isSpeakingState = false;
+            emitBrowserEvent('vad-state', { speaking: false, rms });
         }
-        // 3. Downsample to 16kHz s16le PCM
+        // 3. High-Quality Linear Interpolation Resampling to 16kHz s16le PCM (Preserves full voice clarity)
         const outLength = Math.round(inputData.length / ratio);
         const pcm16 = new Int16Array(outLength);
-        const isQuiet = rms < NOISE_GATE_RMS;
         for (let i = 0; i < outLength; i++) {
-            if (isQuiet) {
-                pcm16[i] = 0; // Clean silence gating eliminates ambient hiss
-            }
-            else {
-                const idx = Math.floor(i * ratio);
-                const s = Math.max(-1, Math.min(1, inputData[idx]));
-                pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-            }
+            const srcPos = i * ratio;
+            const idx = Math.floor(srcPos);
+            const frac = srcPos - idx;
+            const s0 = inputData[idx] || 0;
+            const s1 = idx + 1 < inputData.length ? inputData[idx + 1] : s0;
+            const s = Math.max(-1, Math.min(1, s0 + frac * (s1 - s0)));
+            pcm16[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
         }
         // 4. Equal-Sized Frame Accumulator (2560 samples = 160ms = 5120 bytes)
-        // Guarantees all outbound audio frames are equal in size and transferred with uniform latency.
         for (let i = 0; i < outLength; i++) {
             outboundChunkBuffer[outboundChunkOffset++] = pcm16[i];
             if (outboundChunkOffset >= CHUNK_TARGET_SAMPLES) {
@@ -334,7 +313,11 @@ async function startBrowserCapture(ws) {
         }
     };
     sourceNode.connect(processor);
-    processor.connect(ctx.destination);
+    // Route processor through zero-gain node to destination to prevent mic echo through phone speakers
+    const silentGain = ctx.createGain();
+    silentGain.gain.value = 0;
+    processor.connect(silentGain);
+    silentGain.connect(ctx.destination);
 }
 export async function invoke(cmd, args) {
     if (isNativeTauri) {

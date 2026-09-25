@@ -648,7 +648,10 @@ function forwardOllalinkToRoom(client, evt) {
     // marker so peers can flush their playback.
     const marker = p.last === true && !p.pcm;
 
-    for (const peer of others(client.room.code, client.session.sessionId)) {
+    const peers = others(client.room.code, client.session.sessionId);
+    const recipients = peers.length > 0 ? peers : [client.session];
+
+    for (const peer of recipients) {
       if (peer.ws?.readyState !== 1) continue;
       
       // Check target language match (supports ISO prefixes like 'hi-IN' matching 'hi'):
