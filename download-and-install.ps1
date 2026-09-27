@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Ollalink Translate - Standalone Zip Downloader, Installer & Auto-Host Launcher
 .DESCRIPTION
@@ -19,6 +19,7 @@
 
 [CmdletBinding()]
 param (
+    [string]$ExpectedSha256 = "",
     [string]$ZipUrl = "",
     [string]$ZipPath = "",
     [string]$InstallDir = "$env:LOCALAPPDATA\OllalinkTranslate",
@@ -31,7 +32,7 @@ $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
 
 Write-Host "============================================================" -ForegroundColor Magenta
-Write-Host "   Ollalink Translate — Windows Installer (Zero Docker)" -ForegroundColor Magenta
+Write-Host "   Ollalink Translate - Windows Installer (Zero Docker)" -ForegroundColor Magenta
 Write-Host "   Automated Agent & User Distribution Package" -ForegroundColor DarkGray
 Write-Host "============================================================" -ForegroundColor Magenta
 
@@ -68,6 +69,45 @@ if (-not $targetZip -or -not (Test-Path $targetZip)) {
     Write-Host "[ERR] Could not locate Ollalink-Translate-Windows-x64.zip." -ForegroundColor Red
     Write-Host "Please place Ollalink-Translate-Windows-x64.zip in the same folder as this script, in Downloads, or specify -ZipUrl / -ZipPath." -ForegroundColor Yellow
     exit 1
+}
+
+
+# 1.5 Verify Archive Integrity (SEC-03 Remediation)
+$computedHash = (Get-FileHash -Path $targetZip -Algorithm SHA256).Hash.ToUpperInvariant()
+Write-Host "[..] Package SHA-256: $computedHash" -ForegroundColor DarkGray
+
+$validChecksum = $null
+if ($ExpectedSha256) {
+    $validChecksum = $ExpectedSha256.Trim().ToUpperInvariant()
+} else {
+    $zipDir = Split-Path -Parent $targetZip
+    $sumsFile = Join-Path $zipDir "SHA256SUMS.txt"
+    $dotSha256 = "$targetZip.sha256"
+    if (Test-Path $dotSha256) {
+        $content = (Get-Content $dotSha256 -Raw).Trim()
+        $validChecksum = ($content -split '\s+')[0].ToUpperInvariant()
+    } elseif (Test-Path $sumsFile) {
+        $zipBase = Split-Path -Leaf $targetZip
+        foreach ($line in (Get-Content $sumsFile)) {
+            if ($line -match "([a-fA-F0-9]{64})\s+.*$([regex]::Escape($zipBase))") {
+                $validChecksum = $matches[1].ToUpperInvariant()
+                break
+            }
+        }
+    }
+}
+
+if ($validChecksum) {
+    if ($computedHash -ne $validChecksum) {
+        Write-Host "[ERR] INTEGRITY CHECK FAILED (SEC-03)!" -ForegroundColor Red
+        Write-Host "Expected SHA-256: $validChecksum" -ForegroundColor Red
+        Write-Host "Actual SHA-256:   $computedHash" -ForegroundColor Red
+        Write-Host "The downloaded archive has been corrupted or tampered with. Aborting installation." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "[OK] Archive integrity verified (SHA-256 matches expected checksum)." -ForegroundColor Green
+} else {
+    Write-Host "[WARN] No expected SHA-256 checksum or manifest provided for package verification." -ForegroundColor Yellow
 }
 
 # 2. Extract Archive to Target Directory

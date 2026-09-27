@@ -5,7 +5,7 @@ import http from 'node:http';
 
 process.env.PORT = '33895';
 process.env.PUBLIC_BASE = 'ws://localhost:33895';
-process.env.OLLALINK_DASHBOARD_KEY = 'your_ollalink_dashboard_key_here';
+process.env.OLLALINK_DASHBOARD_KEY = 'sk_test_mock_dummy_key_00000000000000000000';
 process.env.OLLALINK_WS_URL = 'ws://127.0.0.1:33896/v1/speech/stream';
 process.env.SESSION_SECRET = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 process.env.SESSION_TTL_SECONDS = '1800';

@@ -57,6 +57,27 @@ impl Resampler {
         Ok(output)
     }
 
+    /// Flush any remaining samples in the buffer by zero-padding to a full block.
+    /// Prevents trapped samples and tail bursts between sentences.
+    #[allow(dead_code)]
+    pub fn flush(&mut self) -> Result<Vec<f32>> {
+        if self.in_buffer.is_empty() {
+            return Ok(Vec::new());
+        }
+        let needed = self.inner.input_frames_next();
+        if self.in_buffer.len() < needed {
+            self.in_buffer.resize(needed, 0.0);
+        }
+        let chunk: Vec<f32> = self.in_buffer.drain(..needed).collect();
+        let resampled = self.inner.process(&[chunk], None).context("resample flush")?;
+        let mut output = Vec::new();
+        if let Some(mut ch0) = resampled.into_iter().next() {
+            output.append(&mut ch0);
+        }
+        self.in_buffer.clear();
+        Ok(output)
+    }
+
     #[allow(dead_code)]
     pub fn in_rate(&self) -> u32 { self.in_rate }
     #[allow(dead_code)]

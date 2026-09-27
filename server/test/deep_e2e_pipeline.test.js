@@ -6,7 +6,7 @@ import http from 'node:http';
 // Force fixed dev/test configuration
 process.env.PORT = '33880';
 process.env.PUBLIC_BASE = 'ws://localhost:33880';
-process.env.OLLALINK_DASHBOARD_KEY = 'your_ollalink_dashboard_key_here';
+process.env.OLLALINK_DASHBOARD_KEY = 'sk_test_mock_dummy_key_00000000000000000000';
 process.env.OLLALINK_WS_URL = 'ws://127.0.0.1:33881/v1/speech/stream';
 process.env.SESSION_SECRET = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
 process.env.SESSION_TTL_SECONDS = '1800';
@@ -165,7 +165,7 @@ test('Full End-to-End Traversal: Alice speaks English, Bob receives Hindi audio 
 
   // Verify Ollalink received documented session.configure schema
   assert.equal(aliceUpstream.config.type, 'session.configure');
-  assert.equal(aliceUpstream.config.api_key, 'your_ollalink_dashboard_key_here');
+  assert.equal(aliceUpstream.config.api_key, 'sk_test_mock_dummy_key_00000000000000000000');
   assert.equal(aliceUpstream.config.audio.sample_rate, 16000);
   assert.equal(aliceUpstream.config.audio.encoding, 'pcm_s16le');
   assert.equal(aliceUpstream.config.recognition.language, 'en');

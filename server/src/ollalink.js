@@ -144,12 +144,21 @@ export function translateEvent(raw) {
       if (typeof b64 === 'string' && b64.length > 0) {
         try { pcm = Buffer.from(b64, 'base64'); } catch { pcm = null; }
       }
+      // Inspect audio container directly: WAV files encode true native sample rate in bytes 24..28
+      let detectedWavRate = null;
+      if (pcm && pcm.length >= 28 && pcm.slice(0, 4).toString() === 'RIFF' && pcm.slice(8, 12).toString() === 'WAVE') {
+        const r = pcm.readUInt32LE(24);
+        if (r > 0) detectedWavRate = r;
+      }
+      const codec = detectedWavRate ? 'wav' : (parsed.codec ?? 'pcm_s16le');
+      const sampleRate = detectedWavRate ?? parsed.sample_rate ?? (codec === 'wav' ? 24000 : 48000);
+
       return {
         kind: 'audio',
         payload: {
           pcm,
-          codec: parsed.codec ?? 'pcm_s16le',
-          sampleRate: parsed.sample_rate ?? 48000,
+          codec,
+          sampleRate,
           language: parsed.language ?? parsed.lang ?? '',
           chunkSeq: parsed.chunk_seq ?? 0,
           last: parsed.last === true,

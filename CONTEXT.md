@@ -10,7 +10,7 @@ Ollalink Translate is a production-grade, zero-latency 1:1 and multi-peer voice-
 - **Client**: Native Tauri 2 (Rust 1.77+ & Webview2) desktop client (`ollalink-translate.exe`, 9.57 MB release binary).
 - **Relay Server**: High-performance Node.js 20+ ESM relay (`server/src/server.js`, 140 KB dependencies), orchestrating authentication, room brokering, SFU multi-target fanout, and upstream Ollalink Sound-Stream GPU custody.
 - **Cloud Translation Engine**: Ollalink Sound-Stream GPU WebSocket cluster (`wss://sound-stream.ollalink.com/v1/speech/stream`).
-- **Live API Key**: Verified active & authenticating (`your_ollalink_dashboard_key_here`).
+- **Live API Key**: Verified active & authenticating (`sk_live_...REDACTED...`).
 - **Test Coverage**: **111 / 111 PASSING (0 FAILURES)** across unit, integration, and E2E suites.
 
 ---

@@ -1,6 +1,6 @@
 ﻿# Approval Checklist — Status: COMPLETE & VERIFIED LIVE
 
-The dashboard key (`your_ollalink_dashboard_key_here`) is **ACTIVE and VERIFIED LIVE**.
+The dashboard key (`sk_live_...REDACTED...`) is **ACTIVE and VERIFIED LIVE**.
 
 ## Verification Completed
 
@@ -17,7 +17,7 @@ The dashboard key (`your_ollalink_dashboard_key_here`) is **ACTIVE and VERIFIED 
    ws.on('open', () => {
      ws.send(JSON.stringify({
        type: 'session.configure',
-       api_key: 'your_ollalink_dashboard_key_here',
+       api_key: 'sk_live_...REDACTED...',
        audio: { sample_rate: 16000, channels: 1, encoding: 'pcm_s16le' },
        recognition: { language: 'en', punctuation: true },
        endpointing: { mode: 'auto', silence_ms: 600 },

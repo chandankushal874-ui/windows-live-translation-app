@@ -30,7 +30,7 @@ let captureCtx = null;
 let captureProcessor = null;
 let playbackCtx = null;
 let nextPlayTime = 0;
-let currentInboundSampleRate = 48000;
+let pendingAudioMetaQueue = [];
 // Adaptive Bitrate & VAD State
 let lastRttMs = 45;
 export function getLastRttMs() { return lastRttMs; }
@@ -140,9 +140,6 @@ function playInboundAudioChunk(buffer, sampleRate) {
             src.connect(playbackCtx.destination);
             const now = playbackCtx.currentTime;
             let isChoppy = false;
-            if (decoded.sampleRate) {
-                currentInboundSampleRate = decoded.sampleRate;
-            }
             if (nextPlayTime < now) {
                 nextPlayTime = now; // Seamless playback without inserting artificial silence holes
             }
@@ -170,12 +167,12 @@ function playInboundAudioChunk(buffer, sampleRate) {
     const numSamples = Math.floor(bytes.length / 2);
     if (numSamples === 0)
         return;
-    const effectiveRate = sampleRate || currentInboundSampleRate || 48000;
+    const effectiveRate = sampleRate || 48000;
     const int16 = new Int16Array(bytes.buffer, bytes.byteOffset, numSamples);
     const float32 = new Float32Array(numSamples);
     let peak = 0;
     for (let i = 0; i < numSamples; i++) {
-        const s = int16[i] / 32768.0;
+        const s = Math.max(-1.0, Math.min(1.0, int16[i] / 32768.0));
         float32[i] = s;
         const abs = Math.abs(s);
         if (abs > peak)
@@ -461,8 +458,19 @@ export async function invoke(cmd, args) {
                         if (typeof e.data === 'string') {
                             try {
                                 const msg = JSON.parse(e.data);
-                                if (msg.type === 'audio' && typeof msg.sampleRate === 'number' && msg.sampleRate > 0) {
-                                    currentInboundSampleRate = msg.sampleRate;
+                                if (msg.type === 'audio') {
+                                    const isWavCodec = msg.codec === 'wav';
+                                    const sr = (typeof msg.sampleRate === 'number' && msg.sampleRate > 0)
+                                        ? msg.sampleRate
+                                        : (isWavCodec ? 24000 : 48000);
+                                    if (msg.hasBinary === true) {
+                                        if (pendingAudioMetaQueue.length >= 32)
+                                            pendingAudioMetaQueue.shift();
+                                        pendingAudioMetaQueue.push({ sampleRate: sr });
+                                    }
+                                    else if (msg.endOfUtterance || msg.last) {
+                                        pendingAudioMetaQueue = [];
+                                    }
                                 }
                                 if (msg.type === 'joined' && !joinedResolved) {
                                     joinedResolved = true;
@@ -504,7 +512,8 @@ export async function invoke(cmd, args) {
                                 isCutAudio,
                             });
                             // INBOUND TRANSLATED AUDIO PCM -> PLAY THROUGH SPEAKERS
-                            playInboundAudioChunk(e.data);
+                            const meta = pendingAudioMetaQueue.shift();
+                            playInboundAudioChunk(e.data, meta?.sampleRate);
                         }
                         else if (typeof Blob !== 'undefined' && e.data instanceof Blob) {
                             e.data.arrayBuffer().then((buf) => {
@@ -519,7 +528,8 @@ export async function invoke(cmd, args) {
                                     bytes: byteCount,
                                     isCutAudio,
                                 });
-                                playInboundAudioChunk(buf);
+                                const meta = pendingAudioMetaQueue.shift();
+                                playInboundAudioChunk(buf, meta?.sampleRate);
                             });
                         }
                     };

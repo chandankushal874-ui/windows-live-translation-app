@@ -14,7 +14,7 @@ services:
       - key: PORT
         value: 10000
       - key: OLLALINK_KEY
-        value: your_ollalink_dashboard_key_here
+        sync: false
       - key: OLLALINK_WS_URL
         value: wss://sound-stream.ollalink.com/v1/speech/stream
       - key: MAX_PARTICIPANTS

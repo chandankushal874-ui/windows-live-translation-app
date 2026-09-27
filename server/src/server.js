@@ -32,7 +32,19 @@ import { normalizeLang, hasProductionVoice, SOUND_STREAM_SOURCES, SOUND_STREAM_T
 // ---------- HTTP ----------
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, `http://${req.headers.host}`);
+  let url;
+  try {
+    // Validate host header format: allowed hostname chars, port, and IPv6 brackets (SRV-02 fix)
+    const rawHost = req.headers.host;
+    const safeHost = (typeof rawHost === 'string' && /^[\w.:\-[\]]+$/.test(rawHost))
+      ? rawHost
+      : 'localhost';
+    url = new URL(req.url, `http://${safeHost}`);
+  } catch {
+    // Malformed request URL or host header -> Return 400 Bad Request immediately without crashing
+    res.writeHead(400, { 'content-type': 'application/json' });
+    return res.end(JSON.stringify({ error: 'invalid_request', message: 'Malformed request URL or Host header' }));
+  }
 
   // Universal CORS for desktop WebView2, Tauri clients, and web browsers
   const origin = req.headers.origin || '*';
@@ -224,12 +236,16 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
           userId: payload.sub,
           sourceLang: payload.src,
           targetLang: payload.tgt,
+          voice: payload.voice,
+          tone: payload.tone,
         });
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           token: session.token,
           expiresAt: session.expiresAt,
           sessionId: session.sessionId,
+          voice: session.voice,
+          tone: session.tone,
         }));
       } catch (err) {
         res.writeHead(400, { 'content-type': 'application/json' });
@@ -321,6 +337,8 @@ wss.on('connection', (ws, req) => {
         }
         const oldSid = client.session.sessionId;
         client.session.sessionId = newPayload.sid;
+        if (newPayload.voice && newPayload.voice !== 'nh-m01') client.session.voice = newPayload.voice;
+        if (newPayload.tone && newPayload.tone !== 'natural') client.session.tone = newPayload.tone;
         // Also update the room's participant map so others() sees the new sid.
         if (client.room) {
           const p = client.room.participants.get(oldSid);
@@ -484,8 +502,18 @@ wss.on('connection', (ws, req) => {
         // Re-open THIS participant's upstream with the new multi-target set.
         try { client.upstream?.close(); } catch { /* ignore */ }
         const newTargets = computeTargets(client.room, client.session.sessionId, tgt);
+        if (msg.voice) client.session.voice = normalizeVoice(msg.voice);
+        if (msg.tone) client.session.tone = normalizeTone(msg.tone);
+
         client.upstream = openOllalinkStream(
-          { sourceLang: src, targetLangs: newTargets, sessionToken: msg.token ?? '', silenceMs: 1500 },
+          {
+            sourceLang: src,
+            targetLangs: newTargets,
+            sessionToken: msg.token ?? '',
+            silenceMs: 1500,
+            voice: client.session.voice,
+            tone: client.session.tone,
+          },
           {
             onEvent: (evt) => forwardOllalinkToRoom(client, evt),
             onClose: () => broadcastToOthers(client, { type: 'peer-upstream-closed', from: client.session.sessionId }),
@@ -656,7 +684,7 @@ function broadcastToOthers(client, msg) {
  * Captions similarly carry a `language` (target) for translation events and
  * the source language for transcript events. We honor `captionsOn` per peer.
  */
-function forwardOllalinkToRoom(client, evt) {
+export function forwardOllalinkToRoom(client, evt) {
   if (!client.session || !client.room) return;
 
   // -------- AUDIO (spoken translated voice) --------
@@ -666,11 +694,12 @@ function forwardOllalinkToRoom(client, evt) {
     // marker so peers can flush their playback.
     const marker = p.last === true && !p.pcm;
 
-    const peers = others(client.room.code, client.session.sessionId);
+    const peers = Array.from(others(client.room.code, client.session.sessionId));
     const recipients = peers.length > 0 ? peers : [client.session];
 
     for (const peer of recipients) {
-      if (peer.ws?.readyState !== 1) continue;
+      const targetWs = peer.ws ?? client.ws;
+      if (targetWs?.readyState !== 1) continue;
       
       // Check target language match (supports ISO prefixes like 'hi-IN' matching 'hi'):
       if (p.language && peer.targetLang) {
@@ -680,7 +709,7 @@ function forwardOllalinkToRoom(client, evt) {
       }
 
       try {
-        peer.ws.send(JSON.stringify({
+        targetWs.send(JSON.stringify({
           type: 'audio',
           from: client.session.sessionId,
           lang: p.language,
@@ -692,7 +721,7 @@ function forwardOllalinkToRoom(client, evt) {
           hasBinary: !!p.pcm,
           utteranceId: p.utteranceId,
         }));
-        if (p.pcm) peer.ws.send(p.pcm, { binary: true });
+        if (p.pcm) targetWs.send(p.pcm, { binary: true });
       } catch { /* ignore */ }
     }
     return;

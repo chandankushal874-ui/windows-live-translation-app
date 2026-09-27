@@ -57,8 +57,8 @@ struct RelayInner {
     /// Outbound queue. Replaced on reconnect; send_pcm clones the current sender.
     out_tx: Mutex<mpsc::UnboundedSender<Message>>,
     /// Stable inbound-audio queue. Sender is swapped on reconnect; receiver lives forever.
-    audio_in_tx: Mutex<mpsc::UnboundedSender<(Vec<u8>, u32)>>,
-    audio_out_rx: Mutex<mpsc::UnboundedReceiver<(Vec<u8>, u32)>>,
+    audio_in_tx: Mutex<mpsc::UnboundedSender<(Vec<u8>, u32, bool)>>,
+    audio_out_rx: Mutex<mpsc::UnboundedReceiver<(Vec<u8>, u32, bool)>>,
     shutdown: AtomicBool,
     reconnecting: AtomicBool,
     reconnect_notify: Notify,
@@ -67,7 +67,7 @@ struct RelayInner {
 impl RelaySocket {
     pub async fn connect(cfg: RelaySocketConfig, app: AppHandle) -> Result<Self> {
         // Stable audio channel: receiver lives for the lifetime of the socket handle.
-        let (audio_tx, audio_rx) = mpsc::unbounded_channel::<(Vec<u8>, u32)>();
+        let (audio_tx, audio_rx) = mpsc::unbounded_channel::<(Vec<u8>, u32, bool)>();
         // Provisional out_tx; replaced after first open_socket call.
         let (out_tx, _drop_rx) = mpsc::unbounded_channel::<Message>();
 
@@ -137,31 +137,77 @@ impl RelaySocket {
         // Reader task. Uses the *stable* audio_in_tx so playback is undisturbed.
         let inner_r = inner.clone();
         tokio::spawn(async move {
-            let mut _expect_audio = false;
-            let mut last_sample_rate: u32 = 48_000;
+            #[derive(Debug, Clone, Copy)]
+            struct ExpectedChunk {
+                sample_rate: u32,
+                is_last: bool,
+            }
+            // Strict FIFO queue for matching text headers to upcoming binary frames.
+            // Bounded to 32 items to guarantee deterministic memory and prevent offset drifts on dropped frames.
+            let mut expected_audio_queue: std::collections::VecDeque<ExpectedChunk> =
+                std::collections::VecDeque::with_capacity(32);
+
             while let Some(msg) = read_half.next().await {
                 let msg = match msg {
                     Ok(m) => m,
                     Err(e) => {
+                        expected_audio_queue.clear();
                         let _ = inner_r.app.emit("relay-error", e.to_string());
                         break;
                     }
                 };
                 match msg {
-                                        Message::Binary(b) => {
+                    Message::Binary(b) => {
+                        // 1. WAV containers are self-describing; byte 24..28 holds native sample rate.
+                        let detected_rate = if b.starts_with(b"RIFF") && b.len() >= 28 && b.get(8..12) == Some(b"WAVE") {
+                            let r = u32::from_le_bytes([b[24], b[25], b[26], b[27]]);
+                            if r > 0 { Some(r) } else { Some(24_000) }
+                        } else {
+                            None
+                        };
+
+                        // 2. Pop corresponding metadata from the strict FIFO queue.
+                        let meta = expected_audio_queue.pop_front();
+                        let is_last = meta.map(|m| m.is_last).unwrap_or(false);
+
+                        // 3. Guaranteed sample rate: WAV header overrides queue; queued rate takes precedence over raw PCM default; fallback is 48kHz streaming.
+                        let rate = detected_rate
+                            .or_else(|| meta.map(|m| m.sample_rate))
+                            .unwrap_or(48_000);
+
                         let tx = inner_r.audio_in_tx.lock().await;
-                        let _ = tx.send((b, last_sample_rate));
+                        let _ = tx.send((b, rate, is_last));
                     }
                     Message::Text(t) => {
                         match serde_json::from_str::<ServerEvent>(&t) {
-                            Ok(ev @ ServerEvent::Audio { end_of_utterance, has_binary, sample_rate, .. }) => {
-                                if let Some(sr) = sample_rate {
-                                    if sr > 0 { last_sample_rate = sr; }
-                                }
+                            Ok(ev @ ServerEvent::Audio { end_of_utterance, has_binary, sample_rate, last, .. }) => {
                                 let is_marker = end_of_utterance.unwrap_or(false);
+                                let is_last = last.unwrap_or(false);
                                 let carries_binary = has_binary.unwrap_or(!is_marker);
+
+                                let is_wav = match &ev {
+                                    ServerEvent::Audio { codec: Some(c), .. } => c.eq_ignore_ascii_case("wav"),
+                                    _ => false,
+                                };
+                                // Explicit chunk rate: check header, codec fallback (wav = 24kHz, pcm = 48kHz)
+                                let chunk_rate = match sample_rate {
+                                    Some(sr) if sr > 0 => sr,
+                                    _ => if is_wav { 24_000 } else { 48_000 },
+                                };
+
                                 if carries_binary {
-                                    _expect_audio = true;
+                                    if expected_audio_queue.len() >= 32 {
+                                        expected_audio_queue.pop_front();
+                                    }
+                                    expected_audio_queue.push_back(ExpectedChunk {
+                                        sample_rate: chunk_rate,
+                                        is_last,
+                                    });
+                                } else if is_marker || is_last {
+                                    let tx = inner_r.audio_in_tx.lock().await;
+                                    let _ = tx.send((Vec::new(), 0, true));
+                                    // End of utterance reached: clear queue to prevent any off-by-one misalignment in next utterance
+                                    expected_audio_queue.clear();
                                 }
                                 let _ = inner_r.app.emit("relay-event", ev);
                             }
@@ -277,7 +323,7 @@ impl RelaySocket {
     }
 
     /// Await the next inbound audio frame.
-    pub async fn next_inbound_audio(&self) -> Option<(Vec<u8>, u32)> {
+    pub async fn next_inbound_audio(&self) -> Option<(Vec<u8>, u32, bool)> {
         let mut guard = self.inner.audio_out_rx.lock().await;
         guard.recv().await
     }

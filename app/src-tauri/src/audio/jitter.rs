@@ -1,4 +1,4 @@
-﻿//! audio/jitter.rs â€” playback jitter buffer.
+//! audio/jitter.rs — playback jitter buffer.
 //!
 //! Receives PCM or WAV frames captured from the relay:
 //!   - 48 kHz mono s16le PCM from Ollalink sound-stream (streaming lane)
@@ -11,38 +11,88 @@
 use crate::audio::resample::Resampler;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use tokio::sync::Mutex as AsyncMutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const ASSUMED_IN_RATE: u32 = 48_000;
 
 pub struct JitterPlayer {
-    /// Output device rate (e.g. 48_000)
-    out_rate: u32,
-    /// Channels the output stream was opened with. Playback duplicates mono.
-    out_channels: usize,
+    /// Output device rate (e.g. 48_000, 44_100, 96_000). Atomic for hot-swap (RS-04).
+    out_rate: AtomicU32,
+    /// Channels the output stream was opened with. Playback duplicates mono. Atomic for hot-swap (RS-04).
+    out_channels: AtomicUsize,
     /// Target buffer in milliseconds.
     target_ms: u32,
     /// Buffered samples (already resampled to out_rate, mono).
     ring: Mutex<VecDeque<f32>>,
     /// State flag for playback prebuffering
     playing: Mutex<bool>,
+    /// Number of consecutive callbacks that encountered an empty ring buffer
+    consecutive_empty: Mutex<usize>,
     /// Last detected or signaled input sample rate
     last_in_rate: Mutex<u32>,
+    /// Total underrun count telemetry
+    underruns: AtomicU64,
     /// Resamplers keyed by input sample rate (e.g. 48_000, 24_000, 16_000 -> out_rate).
-    resamplers: AsyncMutex<HashMap<u32, Resampler>>,
+    resamplers: Mutex<HashMap<u32, Resampler>>,
 }
 
 impl JitterPlayer {
     pub fn new(out_rate: u32, out_channels: usize, target_ms: u32) -> Self {
         Self {
-            out_rate,
-            out_channels: out_channels.max(1),
+            out_rate: AtomicU32::new(if out_rate > 0 { out_rate } else { 48_000 }),
+            out_channels: AtomicUsize::new(out_channels.max(1)),
             target_ms,
             ring: Mutex::new(VecDeque::new()),
             playing: Mutex::new(false),
+            consecutive_empty: Mutex::new(0),
             last_in_rate: Mutex::new(ASSUMED_IN_RATE),
-            resamplers: AsyncMutex::new(HashMap::new()),
+            underruns: AtomicU64::new(0),
+            resamplers: Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Read current configured output sample rate.
+    pub fn out_rate(&self) -> u32 {
+        self.out_rate.load(Ordering::Relaxed)
+    }
+
+    /// Read current configured output channel count.
+    pub fn out_channels(&self) -> usize {
+        self.out_channels.load(Ordering::Relaxed)
+    }
+
+    /// Hot-swap the output device's sample rate and channel count (RS-04 fix).
+    /// Dynamically purges stale resamplers, clears old rate samples, and resets pre-buffering.
+    /// Synchronous to avoid holding cpal::Stream across await points (Send safety).
+    pub fn update_output_config(&self, new_rate: u32, new_channels: usize) {
+        let valid_rate = if new_rate > 0 { new_rate } else { 48_000 };
+        let valid_ch = new_channels.max(1);
+
+        let old_rate = self.out_rate.swap(valid_rate, Ordering::SeqCst);
+        let old_ch = self.out_channels.swap(valid_ch, Ordering::SeqCst);
+
+        tracing::info!(
+            old_rate,
+            new_rate = valid_rate,
+            old_ch,
+            new_ch = valid_ch,
+            "RS-04: jitter player output configuration updated"
+        );
+
+        // If sample rate changed, cached resamplers are targeted to the old rate.
+        // Clear them so fresh resamplers targeted to new_rate are instantiated.
+        if old_rate != valid_rate {
+            let mut map = self.resamplers.lock();
+            map.clear();
+        }
+
+        // Reset the playback prebuffering and clear old resampled samples to avoid pitch/speed artifacts
+        {
+            let mut ring = self.ring.lock();
+            ring.clear();
+        }
+        *self.playing.lock() = false;
+        *self.consecutive_empty.lock() = 0;
     }
 
     /// Push an audio frame with backwards compatibility.
@@ -64,15 +114,15 @@ impl JitterPlayer {
                 }
             }
             let valid_rate = if rate > 0 { rate } else { 24_000 };
-            *self.last_in_rate.lock() = valid_rate;
+            // WAV rate is local to this container frame; do not overwrite last_in_rate so raw PCM does not inherit 24kHz!
             (valid_rate, &bytes[offset..])
         } else {
             let rate = if explicit_rate > 0 {
-                *self.last_in_rate.lock() = explicit_rate;
                 explicit_rate
             } else {
-                *self.last_in_rate.lock()
+                ASSUMED_IN_RATE
             };
+            *self.last_in_rate.lock() = rate;
             (rate, bytes)
         };
 
@@ -85,16 +135,18 @@ impl JitterPlayer {
             samples.push(i as f32 / 32768.0);
         }
 
-        // Resample dynamically based on native input rate
-        let resampled = if in_rate == self.out_rate {
+        let out_rate = self.out_rate.load(Ordering::Relaxed);
+
+        // Resample dynamically based on native input rate to current output device rate
+        let resampled = if in_rate == out_rate {
             samples
         } else {
-            let mut map = self.resamplers.lock().await;
+            let mut map = self.resamplers.lock();
             if !map.contains_key(&in_rate) {
-                match Resampler::new(in_rate, self.out_rate) {
+                match Resampler::new(in_rate, out_rate) {
                     Ok(r) => { map.insert(in_rate, r); }
                     Err(e) => {
-                        tracing::error!(error=%e, in_rate, "jitter resampler init failed");
+                        tracing::error!(error=%e, in_rate, out_rate, "jitter resampler init failed");
                         return;
                     }
                 }
@@ -106,14 +158,14 @@ impl JitterPlayer {
             match resampler.process(&samples) {
                 Ok(v) => v,
                 Err(e) => {
-                    tracing::error!(error=%e, in_rate, "jitter resample failed");
+                    tracing::error!(error=%e, in_rate, out_rate, "jitter resample failed");
                     return;
                 }
             }
         };
 
-        // Retain up to 30 seconds of audio. NEVER drop words or chunk bursts mid-sentence!
-        let cap = (self.out_rate as usize) * 30;
+        // Retain up to 4 seconds of audio.
+        let cap = (out_rate as usize) * 4;
         let mut ring = self.ring.lock();
         for s in resampled {
             if ring.len() >= cap {
@@ -123,7 +175,7 @@ impl JitterPlayer {
         }
     }
 
-    /// Push a 48 kHz mono s16le PCM frame (or WAV file) â€” preserves backwards compatibility.
+    /// Push a 48 kHz mono s16le PCM frame (or WAV file) — preserves backwards compatibility.
     #[allow(dead_code)]
     pub async fn push_pcm48k(&self, bytes: &[u8]) {
         self.push_audio(bytes).await;
@@ -133,32 +185,47 @@ impl JitterPlayer {
     pub fn fill_into<T: cpal::Sample + cpal::FromSample<f32>>(&self, out: &mut [T]) {
         let needed = out.len();
         let mut ring = self.ring.lock();
-        let target_len = (self.out_rate as usize) * (self.target_ms as usize) / 1000;
+        let out_rate = self.out_rate.load(Ordering::Relaxed);
+        let target_len = (out_rate as usize) * (self.target_ms as usize) / 1000;
 
         let mut playing = self.playing.lock();
+        let mut consecutive_empty = self.consecutive_empty.lock();
 
         // Gating only occurs before playback starts (pre-buffer)
         if !*playing {
             if ring.len() >= target_len {
                 *playing = true;
+                *consecutive_empty = 0;
             } else {
                 for s in out.iter_mut() { *s = <T as cpal::FromSample<f32>>::from_sample_(0.0); }
                 return;
             }
         }
 
-        let ch = self.out_channels;
+        let ch = self.out_channels.load(Ordering::Relaxed);
         let mut i = 0;
         while i < needed {
             if let Some(next) = ring.pop_front() {
+                *consecutive_empty = 0;
+                // Clamp to prevent DAC clipping/distortion noise (Bug #2 fix)
+                let clamped = next.clamp(-1.0, 1.0);
                 for c in 0..ch {
                     if i + c < needed {
-                        out[i + c] = <T as cpal::FromSample<f32>>::from_sample_(next);
+                        out[i + c] = <T as cpal::FromSample<f32>>::from_sample_(clamped);
                     }
                 }
                 i += ch;
             } else {
-                *playing = false;
+                // Buffer momentarily emptied mid-callback (Bug #1 & Bug #6 fix)
+                self.underruns.fetch_add(1, Ordering::Relaxed);
+                *consecutive_empty += 1;
+
+                // Only transition back to pre-buffering if the buffer has been empty for
+                // at least 15 consecutive callbacks (~150ms), meaning the utterance truly finished.
+                if *consecutive_empty >= 15 {
+                    *playing = false;
+                }
+
                 while i < needed {
                     out[i] = <T as cpal::FromSample<f32>>::from_sample_(0.0);
                     i += 1;
@@ -168,9 +235,120 @@ impl JitterPlayer {
         }
     }
 
+    /// Flush active resamplers into the ring buffer when an utterance ends.
+    pub async fn flush_resamplers(&self) {
+        *self.last_in_rate.lock() = ASSUMED_IN_RATE;
+        let mut map = self.resamplers.lock();
+        let mut flushed_all = Vec::new();
+        for resampler in map.values_mut() {
+            if let Ok(mut samples) = resampler.flush() {
+                flushed_all.append(&mut samples);
+            }
+        }
+        if !flushed_all.is_empty() {
+            let out_rate = self.out_rate.load(Ordering::Relaxed);
+            let cap = (out_rate as usize) * 4;
+            let mut ring = self.ring.lock();
+            for s in flushed_all {
+                if ring.len() >= cap { ring.pop_front(); }
+                ring.push_back(s);
+            }
+        }
+    }
+
+    /// Read total underrun count.
+    #[allow(dead_code)]
+    pub fn underruns(&self) -> u64 {
+        self.underruns.load(Ordering::Relaxed)
+    }
+
     #[allow(dead_code)]
     pub fn buffered_ms(&self) -> u32 {
         let len = self.ring.lock().len() as u32;
-        len * 1000 / self.out_rate
+        let out_rate = self.out_rate.load(Ordering::Relaxed);
+        if out_rate == 0 { return 0; }
+        len * 1000 / out_rate
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_jitter_player_init_and_config_update() {
+        let player = JitterPlayer::new(48_000, 2, 100);
+        assert_eq!(player.out_rate(), 48_000);
+        assert_eq!(player.out_channels(), 2);
+
+        // Feed some samples
+        let pcm = vec![0u8; 960]; // 480 samples @ s16le
+        player.push_audio(&pcm).await;
+        assert!(player.ring.lock().len() > 0);
+
+        // Hot swap to 44.1 kHz mono DAC/Headphones (RS-04)
+        player.update_output_config(44_100, 1);
+        assert_eq!(player.out_rate(), 44_100);
+        assert_eq!(player.out_channels(), 1);
+        // Ring should be cleared on swap to prevent old rate pitch distortion
+        assert_eq!(player.ring.lock().len(), 0);
+        assert!(!*player.playing.lock());
+    }
+
+    #[tokio::test]
+    async fn test_jitter_player_multichannel_fill_into() {
+        let player = JitterPlayer::new(48_000, 2, 20); // 20ms prebuffer = 960 samples
+        
+        // Push 1000 samples of 0.5 amplitude
+        let mut pcm = Vec::with_capacity(2000);
+        let val_bytes = (16384i16).to_le_bytes(); // 0.5 amplitude
+        for _ in 0..1000 {
+            pcm.extend_from_slice(&val_bytes);
+        }
+        player.push_audio(&pcm).await;
+
+        let mut out = [0.0f32; 8]; // 4 stereo frames
+        player.fill_into(&mut out);
+
+        // Verify interleaved stereo duplication
+        for pair in out.chunks_exact(2) {
+            assert!((pair[0] - 0.5).abs() < 1e-4);
+            assert!((pair[1] - 0.5).abs() < 1e-4);
+        }
+
+        // Hot swap to 5.1 surround (6 channels)
+        player.update_output_config(48_000, 6);
+        assert_eq!(player.out_channels(), 6);
+
+        // Push new samples
+        player.push_audio(&pcm).await;
+        let mut out_surround = [0.0f32; 12]; // 2 surround frames (6 ch each)
+        player.fill_into(&mut out_surround);
+
+        for ch in 0..6 {
+            assert!((out_surround[ch] - 0.5).abs() < 1e-4);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_jitter_player_hot_swap_resample_48k_to_44k() {
+        let player = JitterPlayer::new(48_000, 2, 20);
+        
+        // Push 480 samples @ 48kHz (10ms)
+        let pcm48 = vec![0u8; 960];
+        player.push_audio_with_rate(&pcm48, 48_000).await;
+        // Same rate -> no resampling -> exactly 480 samples
+        assert_eq!(player.ring.lock().len(), 480);
+
+        // Hot swap to 44.1kHz (Bluetooth headset)
+        player.update_output_config(44_100, 2);
+        assert_eq!(player.out_rate(), 44_100);
+        assert_eq!(player.ring.lock().len(), 0); // Purged old samples
+
+        // Push another 480 samples @ 48kHz
+        player.push_audio_with_rate(&pcm48, 48_000).await;
+        // Resampled dynamically from 48kHz to 44.1kHz
+        let count = player.ring.lock().len();
+        assert!(count > 250 && count <= 441, "Expected resampled samples for 44.1kHz, got {}", count);
     }
 }

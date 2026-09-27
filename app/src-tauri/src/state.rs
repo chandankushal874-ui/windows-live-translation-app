@@ -65,6 +65,10 @@ pub struct CallArgs {
     pub output_device: Option<String>,
     pub captions_on: bool,
     pub credentials: SessionCredentials,
+    #[serde(default)]
+    pub voice: Option<String>,
+    #[serde(default)]
+    pub tone: Option<String>,
 }
 
 /// The pieces that must be shut down when a call ends, in order.
@@ -73,6 +77,10 @@ struct ActiveCall {
     audio: Arc<AudioPipeline>,
     refresh_task: JoinHandle<()>,
     _args: CallArgs,
+    voice: Arc<RwLock<Option<String>>>,
+    tone: Arc<RwLock<Option<String>>>,
+    source_lang: Arc<RwLock<String>>,
+    target_lang: Arc<RwLock<String>>,
 }
 
 pub struct AppState {
@@ -123,6 +131,12 @@ impl AppState {
         let guard = self.active.lock().await;
         match guard.as_ref() {
             Some(call) => {
+                if voice.is_some() {
+                    *call.voice.write() = voice.clone();
+                }
+                if tone.is_some() {
+                    *call.tone.write() = tone.clone();
+                }
                 call.relay
                     .send_json(serde_json::json!({
                         "type": "update-voice-settings",
@@ -169,11 +183,21 @@ impl AppState {
         let guard = self.active.lock().await;
         match guard.as_ref() {
             Some(call) => {
+                if let Some(ref s) = source_lang {
+                    *call.source_lang.write() = s.clone();
+                }
+                if let Some(ref t) = target_lang {
+                    *call.target_lang.write() = t.clone();
+                }
+                let cur_voice = call.voice.read().clone();
+                let cur_tone = call.tone.read().clone();
                 call.relay
                     .send_json(serde_json::json!({
                         "type": "lang.change",
                         "sourceLang": source_lang,
                         "targetLang": target_lang,
+                        "voice": cur_voice,
+                        "tone": cur_tone,
                     }))
                     .await
                     .context("send lang.change")
@@ -231,19 +255,26 @@ impl AppState {
             output_device: args.output_device.clone(),
             sample_rate: 16_000,
             frame_ms: 20,
-            jitter_buffer_ms: 120,
+            jitter_buffer_ms: 200, // 200ms jitter buffer absorbs network packet arrival gaps cleanly
         };
         let audio = AudioPipeline::start(audio_cfg, relay.clone(), self.app_handle.clone())
             .context("start audio pipeline")?;
 
         audio.set_input_gain(f32::from_bits(self.input_volume.load(Ordering::Relaxed)));
 
+        let voice_state = Arc::new(RwLock::new(args.voice.clone()));
+        let tone_state = Arc::new(RwLock::new(args.tone.clone()));
+        let source_lang_state = Arc::new(RwLock::new(args.source_lang.clone()));
+        let target_lang_state = Arc::new(RwLock::new(args.target_lang.clone()));
+
         // 4. Spawn session refresh task. Renews the token at 80% of TTL.
         let refresh_task = spawn_session_refresh(
             args.relay_url.clone(),
             args.display_name.clone(),
-            args.source_lang.clone(),
-            args.target_lang.clone(),
+            source_lang_state.clone(),
+            target_lang_state.clone(),
+            voice_state.clone(),
+            tone_state.clone(),
             args.credentials.expires_at,
             relay.clone(),
             self.app_handle.clone(),
@@ -255,6 +286,10 @@ impl AppState {
                 audio,
                 refresh_task,
                 _args: args,
+                voice: voice_state,
+                tone: tone_state,
+                source_lang: source_lang_state,
+                target_lang: target_lang_state,
             },
             joined,
         ))
@@ -305,8 +340,10 @@ impl AppState {
 fn spawn_session_refresh(
     relay_url: String,
     user_id: String,
-    source_lang: String,
-    target_lang: String,
+    source_lang: Arc<RwLock<String>>,
+    target_lang: Arc<RwLock<String>>,
+    voice: Arc<RwLock<Option<String>>>,
+    tone: Arc<RwLock<Option<String>>>,
     expires_at_ms: u64,
     relay: RelaySocket,
     app: AppHandle,
@@ -326,7 +363,19 @@ fn spawn_session_refresh(
             let refresh_at_ms = ttl_ms * 80 / 100;
             tokio::time::sleep(std::time::Duration::from_millis(refresh_at_ms)).await;
 
-            match mint_session_via_relay(&relay_url, &user_id, &source_lang, &target_lang, None, None).await {
+            let cur_src = source_lang.read().clone();
+            let cur_tgt = target_lang.read().clone();
+            let cur_voice = voice.read().clone();
+            let cur_tone = tone.read().clone();
+
+            match mint_session_via_relay(
+                &relay_url,
+                &user_id,
+                &cur_src,
+                &cur_tgt,
+                cur_voice.as_deref(),
+                cur_tone.as_deref(),
+            ).await {
                 Ok(new_creds) => {
                     failure_count = 0;
                     tracing::info!(new_session_id = %new_creds.session_id, "session refreshed");

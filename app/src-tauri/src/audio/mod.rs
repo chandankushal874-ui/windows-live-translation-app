@@ -102,8 +102,11 @@ impl AudioPipeline {
         // Shared jitter player: playback task pushes, output callback pulls.
         let jitter = Arc::new(JitterPlayer::new(out_rate, out_ch, cfg.jitter_buffer_ms));
 
-        let (output_stream, _rate2, _ch2) =
+        let (output_stream, out_rate_actual, out_ch_actual) =
             open_output_stream(cfg.output_device.as_deref(), cfg.jitter_buffer_ms, jitter.clone(), Some(app.clone()))?;
+        if out_rate_actual != out_rate || out_ch_actual != out_ch {
+            jitter.update_output_config(out_rate_actual, out_ch_actual);
+        }
         output_stream.play().context("start output stream")?;
 
         // Sender task: ring -> resample -> relay.
@@ -130,7 +133,16 @@ impl AudioPipeline {
             tokio::spawn(async move {
                 while running.load(Ordering::Relaxed) {
                     match relay.next_inbound_audio().await {
-                        Some((ref audio_bytes, sr)) => jitter.push_audio_with_rate(audio_bytes, sr).await,
+                        Some((ref audio_bytes, sr, is_last)) => {
+                            if !audio_bytes.is_empty() {
+                                jitter.push_audio_with_rate(audio_bytes, sr).await;
+                            }
+                            if is_last {
+                                // Utterance ended: flush resamplers so trapped residual samples
+                                // are emitted immediately and cannot burst into the next sentence
+                                jitter.flush_resamplers().await;
+                            }
+                        }
                         None => break,
                     }
                 }
@@ -197,17 +209,18 @@ impl AudioPipeline {
         Ok(())
     }
 
-    /// Hot-swap the output device mid-call.
+    /// Hot-swap the output device mid-call (RS-04 fix).
     pub async fn swap_output_device(&self, name: Option<String>) -> Result<()> {
         if let Some(s) = self.output_stream.lock().take() {
             let _ = s.pause();
         }
-        let (new_stream, _rate, _ch) = open_output_stream(
+        let (new_stream, rate, ch) = open_output_stream(
             name.as_deref().or(self.cfg.output_device.as_deref()),
             self.cfg.jitter_buffer_ms,
             self.jitter.clone(),
             Some(self.app.clone()),
         )?;
+        self.jitter.update_output_config(rate, ch);
         new_stream.play().context("restart output stream")?;
         *self.output_stream.lock() = Some(SendStream(new_stream));
         Ok(())
