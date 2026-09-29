@@ -450,8 +450,69 @@ async function main() {
     voiceTone.addEventListener('change', () => {
         midcallVoiceTone.value = voiceTone.value;
     });
+    const btnToggleMic = document.getElementById('btn-toggle-mic');
+    const micIcon = document.getElementById('mic-icon');
+    const micText = document.getElementById('mic-text');
+    let isMicMuted = false;
+    async function updateMicMuteState(muted) {
+        isMicMuted = muted;
+        try {
+            if (controller && controller.isActive()) {
+                await controller.setMicMuted(muted);
+            }
+        }
+        catch (e) {
+            console.warn('setMicMuted error:', e);
+        }
+        if (btnToggleMic) {
+            if (muted) {
+                btnToggleMic.classList.add('muted');
+                if (micIcon)
+                    micIcon.textContent = '🔇';
+                if (micText)
+                    micText.textContent = 'Enable Mic';
+                btnToggleMic.title = 'Microphone Disabled (Muted). Click to Enable.';
+            }
+            else {
+                btnToggleMic.classList.remove('muted');
+                if (micIcon)
+                    micIcon.textContent = '🎙️';
+                if (micText)
+                    micText.textContent = 'Disable Mic';
+                btnToggleMic.title = 'Microphone Active. Click to Disable.';
+            }
+        }
+        const outboundVadBadge = document.getElementById('outbound-vad-badge');
+        const outboundWaveform = document.getElementById('outbound-waveform');
+        if (muted) {
+            if (outboundVadBadge) {
+                outboundVadBadge.className = 'activity-badge muted';
+                outboundVadBadge.textContent = 'Muted';
+            }
+            if (outboundWaveform) {
+                outboundWaveform.classList.add('muted');
+            }
+            setStatus('idle', '🔇 Microphone Disabled (Muted) — Partner cannot hear you');
+        }
+        else {
+            if (outboundVadBadge) {
+                outboundVadBadge.className = 'activity-badge idle';
+                outboundVadBadge.textContent = 'Listening';
+            }
+            if (outboundWaveform) {
+                outboundWaveform.classList.remove('muted');
+            }
+            setStatus('idle', '🎙️ Microphone Active — Listening for speech...');
+        }
+    }
+    if (btnToggleMic) {
+        btnToggleMic.addEventListener('click', async () => {
+            await updateMicMuteState(!isMicMuted);
+        });
+    }
     // ---------- Call Orchestration & Role-Aware Banners ----------
     function switchToCallView(room, isHost) {
+        updateMicMuteState(false);
         currentRoom = room;
         isCurrentCallHost = isHost;
         activeRoomDisplay.textContent = room;
@@ -470,6 +531,7 @@ async function main() {
         }
     }
     function switchToLandingView() {
+        updateMicMuteState(false);
         currentRoom = '';
         selfSessionId = '';
         isCurrentCallHost = false;

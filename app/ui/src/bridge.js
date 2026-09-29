@@ -749,6 +749,13 @@ export async function invoke(cmd, args) {
         case 'set_input_volume': {
             return null;
         }
+        case 'set_mic_muted': {
+            const muted = !!args?.muted;
+            if (activeStream) {
+                activeStream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+            }
+            return null;
+        }
         case 'swap_input_device':
         case 'swap_output_device': {
             return null;

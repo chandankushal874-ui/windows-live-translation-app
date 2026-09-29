@@ -50,4 +50,10 @@ export class CallController {
             return;
         await this.invoke('update_voice_settings', { voice, tone });
     }
+    /** Mute or unmute microphone input and streaming mid-call. */
+    async setMicMuted(muted) {
+        if (!this.active)
+            return;
+        await this.invoke('set_mic_muted', { muted });
+    }
 }

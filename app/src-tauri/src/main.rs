@@ -146,6 +146,7 @@ fn main() {
             commands::end_call,
             commands::call_status,
             commands::set_input_volume,
+            commands::set_mic_muted,
             commands::swap_input_device,
             commands::swap_output_device,
             commands::load_prefs,
@@ -218,7 +219,14 @@ pub mod commands {
         crate::audio::list_devices().map_err(|e| e.to_string())
     }
 
-    /// Live input gain (0.0â€“2.0).
+        /// Mute or unmute the microphone mid-call.
+    #[tauri::command]
+    pub async fn set_mic_muted(state: State<'_, AppState>, muted: bool) -> Result<(), String> {
+        state.set_mic_muted(muted);
+        Ok(())
+    }
+
+    /// Live input gain (0.0–2.0).
     #[tauri::command]
     pub async fn set_input_volume(state: State<'_, AppState>, volume: f32) -> Result<(), String> {
         state.set_input_volume(volume);

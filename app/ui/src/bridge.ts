@@ -773,6 +773,14 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
       return null as T;
     }
 
+    case 'set_mic_muted': {
+      const muted = !!(args as any)?.muted;
+      if (activeStream) {
+        activeStream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+      }
+      return null as T;
+    }
+
     case 'swap_input_device':
     case 'swap_output_device': {
       return null as T;

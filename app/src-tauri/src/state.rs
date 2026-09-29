@@ -20,7 +20,7 @@
 use anyhow::{anyhow, Context, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
 use tokio::sync::Mutex;
@@ -88,6 +88,7 @@ pub struct AppState {
     state: Arc<RwLock<CallState>>,
     active: Arc<Mutex<Option<ActiveCall>>>,
     input_volume: Arc<AtomicU32>, // f32 bits; 1.0 default
+    mic_muted: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -97,11 +98,21 @@ impl AppState {
             state: Arc::new(RwLock::new(CallState::Idle)),
             active: Arc::new(Mutex::new(None)),
             input_volume: Arc::new(AtomicU32::new(1.0f32.to_bits())),
+            mic_muted: Arc::new(AtomicBool::new(false)),
         }
     }
 
     pub async fn status(&self) -> CallState {
         *self.state.read()
+    }
+
+    pub fn set_mic_muted(&self, muted: bool) {
+        self.mic_muted.store(muted, Ordering::Relaxed);
+        if let Ok(guard) = self.active.try_lock() {
+            if let Some(call) = guard.as_ref() {
+                call.audio.set_mic_muted(muted);
+            }
+        }
     }
 
     pub fn set_input_volume(&self, v: f32) {

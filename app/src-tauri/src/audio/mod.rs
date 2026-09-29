@@ -70,6 +70,7 @@ pub struct AudioPipeline {
 
     running: Arc<AtomicBool>,
     input_gain: Arc<AtomicU32>,
+    mic_muted: Arc<AtomicBool>,
     sender_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     playback_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     jitter: Arc<JitterPlayer>,
@@ -84,11 +85,12 @@ impl AudioPipeline {
     ) -> Result<Arc<Self>> {
         let running = Arc::new(AtomicBool::new(true));
         let input_gain = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let mic_muted = Arc::new(AtomicBool::new(false));
         let (prod, cons) = HeapRb::<f32>::new(CAPTURE_RING_SAMPLES).split();
 
         // Open initial input stream
         let (input_stream, in_rate, in_ch) =
-            open_input_stream(cfg.input_device.as_deref(), prod, running.clone(), input_gain.clone(), Some(app.clone()))?;
+            open_input_stream(cfg.input_device.as_deref(), prod, running.clone(), input_gain.clone(), mic_muted.clone(), Some(app.clone()))?;
         input_stream.play().context("start input stream")?;
 
         // Discover output device's native rate/channels before constructing the player
@@ -118,8 +120,9 @@ impl AudioPipeline {
             let target_rate = cfg.sample_rate;
             let frame_ms = cfg.frame_ms;
             let jitter = jitter.clone();
+            let mic_muted = mic_muted.clone();
             tokio::spawn(async move {
-                if let Err(e) = run_sender_watch(cons, ring_rx, in_rate, in_ch, target_rate, frame_ms, relay, app.clone(), running, jitter).await {
+                if let Err(e) = run_sender_watch(cons, ring_rx, in_rate, in_ch, target_rate, frame_ms, relay, app.clone(), running, jitter, mic_muted).await {
                     tracing::error!(error=%e, "sender task failed");
                     let _ = app.emit("audio-error", e.to_string());
                 }
@@ -159,11 +162,16 @@ impl AudioPipeline {
             app,
             running,
             input_gain,
+            mic_muted,
             sender_task: Mutex::new(Some(sender_task)),
             playback_task: Mutex::new(Some(playback_task)),
             jitter,
             cfg,
         }))
+    }
+
+    pub fn set_mic_muted(&self, muted: bool) {
+        self.mic_muted.store(muted, Ordering::Relaxed);
     }
 
     pub fn set_input_gain(&self, v: f32) {
@@ -201,6 +209,7 @@ impl AudioPipeline {
             new_prod,
             self.running.clone(),
             self.input_gain.clone(),
+            self.mic_muted.clone(),
             Some(self.app.clone()),
         )?;
         new_stream.play().context("restart input stream")?;
@@ -259,6 +268,7 @@ fn open_input_stream(
     ring: ringbuf::HeapProd<f32>,
     running: Arc<AtomicBool>,
     gain: Arc<AtomicU32>,
+    mic_muted: Arc<AtomicBool>,
     app: Option<AppHandle>,
 ) -> Result<(Stream, u32, usize)> {
     let host = cpal::default_host();
@@ -286,7 +296,7 @@ fn open_input_stream(
             device.build_input_stream(
                 &sconfig,
                 move |data: &[$t], _| {
-                    if !running.load(Ordering::Relaxed) { return; }
+                    if !running.load(Ordering::Relaxed) || mic_muted.load(Ordering::Relaxed) { return; }
                     let g = f32::from_bits(gain.load(Ordering::Relaxed));
                     if channels == 1 {
                         for &s in data {
@@ -379,6 +389,7 @@ async fn run_sender_watch(
     app: AppHandle,
     running: Arc<AtomicBool>,
     jitter: Arc<JitterPlayer>,
+    mic_muted: Arc<AtomicBool>,
 ) -> Result<()> {
     let frame_samples = (target_rate as usize * frame_ms as usize) / 1000;
     let mut resampler = Resampler::new(in_rate, target_rate)?;
@@ -407,6 +418,19 @@ async fn run_sender_watch(
     const VAD_CONTINUE_PEAK: f32 = 0.024;
 
     while running.load(Ordering::Relaxed) {
+        if mic_muted.load(Ordering::Relaxed) {
+            if is_speaking {
+                is_speaking = false;
+                consecutive_speech_frames = 0;
+                pre_roll.clear();
+                let _ = app.emit("speech-active", false);
+            }
+            pending.clear();
+            scratch.clear();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            continue;
+        }
+
         // Pull latest consumer & sample rate on device hot-swap
         if let Ok((new_cons, new_rate)) = ring_rx.try_recv() {
             ring = new_cons;

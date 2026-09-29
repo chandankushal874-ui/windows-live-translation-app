@@ -1051,3 +1051,61 @@ button:disabled {
 @keyframes spin {
   to { transform: rotate(360deg); }
 }
+
+/* Mute / Disable Microphone Button & Status Indicators */
+.btn-mic-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  background: rgba(30, 41, 59, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  user-select: none;
+}
+
+.btn-mic-toggle:hover {
+  background: rgba(51, 65, 85, 0.95);
+  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-1px);
+}
+
+.btn-mic-toggle:active {
+  transform: translateY(0);
+}
+
+.btn-mic-toggle.muted {
+  background: rgba(239, 68, 68, 0.2) !important;
+  border-color: #ef4444 !important;
+  color: #fca5a5 !important;
+  box-shadow: 0 0 12px rgba(239, 68, 68, 0.3);
+}
+
+.btn-mic-toggle.muted:hover {
+  background: rgba(239, 68, 68, 0.3) !important;
+  border-color: #f87171 !important;
+}
+
+.mic-btn-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.activity-badge.muted {
+  background: rgba(239, 68, 68, 0.2) !important;
+  color: #fca5a5 !important;
+  border: 1px solid #ef4444 !important;
+}
+
+.waveform-bars.muted .bar {
+  height: 2px !important;
+  opacity: 0.25;
+  background: #64748b !important;
+}
