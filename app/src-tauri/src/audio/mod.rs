@@ -473,6 +473,16 @@ async fn run_sender_watch(
         let resampled = resampler.process(&scratch)?;
         pending.extend_from_slice(&resampled);
 
+        // Bug D1 & D3 Fix: Prevent unbounded memory growth and latency death spirals.
+        // Hard-cap pending backlog to at most 1.0s (16,000 samples @ 16kHz).
+        // If a system stall or network pause ever backs up audio, prune stale head samples immediately.
+        const MAX_PENDING_SAMPLES: usize = 16000;
+        if pending.len() > MAX_PENDING_SAMPLES {
+            let excess = pending.len() - MAX_PENDING_SAMPLES;
+            pending.drain(..excess);
+            tracing::warn!(dropped_excess = excess, "pruned stale pending audio backlog to prevent latency buildup");
+        }
+
         // Process equal-sized 16kHz s16le PCM frames
         while pending.len() >= frame_samples {
             let frame: Vec<f32> = pending.drain(..frame_samples).collect();
