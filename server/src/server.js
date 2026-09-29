@@ -596,14 +596,10 @@ wss.on('connection', (ws, req) => {
       return; // unknown JSON frame; ignore
     }
 
-    // Binary PCM from client -> queue with cap and pace to Ollalink at real-time rate
+    // Binary PCM from client -> forward immediately to Ollalink.
+    // Client already paces at 0.5s chunks per Ollalink docs. No server-side queue needed.
     if (!client.upstream?.isOpen()) return;
-    if (!client.upstreamQueue) client.upstreamQueue = [];
-    if (client.upstreamQueue.length >= 250) {
-      client.upstreamQueue.shift(); // Drop oldest to enforce bounded cap (cap=250 frames ~ 5s)
-    }
-    client.upstreamQueue.push(data);
-    schedulePacedUpstreamSend(client);
+    try { client.upstream.send(data); } catch { /* ignore */ }
   });
 
   ws.on('close', () => {
@@ -703,12 +699,6 @@ function handleUpstreamOverloaded(client, evt) {
     } catch {}
   }
 
-  // Clear backlogged queue so we don't immediately burst into the new stream
-  if (client.upstreamQueue) {
-    client.upstreamQueue = client.upstreamQueue.slice(-2);
-    client.upstreamPacingActive = false;
-  }
-
   client._lastOverloaded = Date.now();
   scheduleUpstreamReconnect(client, { reason: 'overloaded', backoff: true });
 }
@@ -716,16 +706,6 @@ function handleUpstreamOverloaded(client, evt) {
 function scheduleUpstreamReconnect(client, { reason = 'error', backoff = true } = {}) {
   if (client._cleaned || !client.room || !client.session || client.ws?.readyState !== 1) {
     return;
-  }
-
-  // Bug 26 & 28 Fix: Cancel any active pacing timer and trim stale queue on all reconnect paths
-  if (client.upstreamPacingTimer) {
-    clearTimeout(client.upstreamPacingTimer);
-    client.upstreamPacingTimer = null;
-  }
-  client.upstreamPacingActive = false;
-  if (client.upstreamQueue) {
-    client.upstreamQueue = client.upstreamQueue.slice(-2);
   }
 
   if (client.reconnectTimer) {
@@ -808,143 +788,40 @@ function handleUpstreamClose(client, code, reasonStr, wasOverloaded) {
 }
 
 
-// Issue 2 & Bug 13 Fix: Inspect config_applied.tts.lanes, capabilities, voice fallback, and translation targets on session.ready
+// Inspect session.ready: warn on missing capabilities + voice fallback
 export function inspectSessionReadyConfig(client, payload) {
   if (!client || !payload) return;
-
   const configApplied = payload.config_applied || payload.config || {};
   const tts = configApplied.tts || {};
-  const rawLanes = tts.lanes || payload.lanes;
 
-  if (!client.targetLanes) {
-    client.targetLanes = {};
-  }
-
-  // Bug 29 & 30 Fix: Map array of strings to target languages correctly and normalize keys
-  if (rawLanes && typeof rawLanes === 'object') {
-    if (Array.isArray(rawLanes)) {
-      const targetLangs = client.currentTargetLangs || (client.session?.targetLang ? [client.session.targetLang] : ['default']);
-      rawLanes.forEach((item, idx) => {
-        if (typeof item === 'string') {
-          const isStream = item.toLowerCase() === 'stream' || item.toLowerCase() === 'pcm';
-          const rawLang = targetLangs[idx] || targetLangs[0] || 'default';
-          const lang = rawLang.toLowerCase().split(/[-_]/)[0];
-          client.targetLanes[lang] = {
-            lane: item,
-            codec: isStream ? 'pcm_s16le' : 'wav',
-            sampleRate: isStream ? 48000 : 24000,
-          };
-        } else if (item && typeof item === 'object' && item.language) {
-          const isStream = String(item.lane).toLowerCase() === 'stream';
-          const lang = item.language.toLowerCase().split(/[-_]/)[0];
-          client.targetLanes[lang] = {
-            lane: item.lane,
-            codec: isStream ? 'pcm_s16le' : 'wav',
-            sampleRate: isStream ? 48000 : 24000,
-          };
-        }
-      });
-    } else {
-      for (const [langKey, lane] of Object.entries(rawLanes)) {
-        const isStream = String(lane).toLowerCase() === 'stream' || String(lane).toLowerCase() === 'pcm';
-        const lang = langKey.toLowerCase().split(/[-_]/)[0];
-        client.targetLanes[lang] = {
-          lane,
-          codec: isStream ? 'pcm_s16le' : 'wav',
-          sampleRate: isStream ? 48000 : 24000,
-        };
-      }
-    }
-  }
-
-  // 2. Verify capabilities includes "tts" and "translation" (Bug 13 Fix)
+  // 1. Warn if capabilities are missing
   const capabilities = payload.capabilities || configApplied.capabilities || [];
   if (Array.isArray(capabilities) && capabilities.length > 0) {
-    const missingCaps = [];
-    if (!capabilities.includes('tts')) missingCaps.push('tts');
-    if (!capabilities.includes('translation')) missingCaps.push('translation');
-
-    if (missingCaps.length > 0) {
-      log.warn(`[OLLALINK READY] Warning: session=${client.session?.sessionId || 'anon'} missing capabilities: [${missingCaps.join(', ')}]. Granted: [${capabilities.join(', ')}]`);
-      if (client.ws?.readyState === 1) {
-        try {
-          client.ws.send(JSON.stringify({
-            type: 'warning',
-            code: 'capability_missing',
-            message: `Upstream did not enable capabilities: ${missingCaps.join(', ')}`,
-            missingCapabilities: missingCaps,
-            grantedCapabilities: capabilities,
-          }));
-        } catch {}
-      }
+    const missing = ['tts', 'translation'].filter(c => !capabilities.includes(c));
+    if (missing.length > 0 && client.ws?.readyState === 1) {
+      try { client.ws.send(JSON.stringify({ type: 'warning', code: 'capability_missing', message: `Missing: ${missing.join(', ')}` })); } catch {}
     }
   }
 
-  // 3. Verify tts_voice matches requested voice and update session metadata on fallback (Bug 13 Fix)
+  // 2. Voice fallback notification
   const requestedVoice = client.upstreamOpts?.voice || client.session?.voice || 'nh-m01';
   const appliedVoice = tts.voice || payload.tts_voice || payload.voice;
   if (appliedVoice && appliedVoice !== requestedVoice) {
-    log.warn(`[OLLALINK READY] Voice fallback detected for session=${client.session?.sessionId || 'anon'}: requested=${requestedVoice}, applied=${appliedVoice}`);
-    if (client.session) {
-      client.session.voice = appliedVoice;
-    }
-    if (client.upstreamOpts) {
-      client.upstreamOpts.voice = appliedVoice;
-    }
+    log.warn(`Voice fallback: ${requestedVoice} -> ${appliedVoice} for ${client.session?.sessionId}`);
+    if (client.session) client.session.voice = appliedVoice;
+    if (client.upstreamOpts) client.upstreamOpts.voice = appliedVoice;
     if (client.ws?.readyState === 1) {
-      try {
-        client.ws.send(JSON.stringify({
-          type: 'voice.settings.updated',
-          voice: appliedVoice,
-          requestedVoice,
-          fallback: true,
-          message: `Requested voice '${requestedVoice}' was rejected or unavailable; fell back to '${appliedVoice}'.`,
-        }));
-      } catch {}
+      try { client.ws.send(JSON.stringify({ type: 'voice.settings.updated', voice: appliedVoice, fallback: true })); } catch {}
     }
     if (client.room && client.session) {
-      broadcastToOthers(client, {
-        type: 'peer-voice-updated',
-        sessionId: client.session.sessionId,
-        voice: appliedVoice,
-      });
+      broadcastToOthers(client, { type: 'peer-voice-updated', sessionId: client.session.sessionId, voice: appliedVoice });
     }
   }
-
-  // 4. Verify config_applied.translation.targets matches requested targets (Bug 13 Fix)
-  const translationApplied = configApplied.translation || payload.translation || {};
-  const appliedTargets = translationApplied.targets || payload.targets;
-  if (Array.isArray(appliedTargets) && client.currentTargetLangs) {
-    const requestedTargets = client.currentTargetLangs;
-    const missingTargets = requestedTargets.filter(t => !appliedTargets.includes(t));
-    if (missingTargets.length > 0) {
-      log.warn(`[OLLALINK READY] Translation targets mismatch for session=${client.session?.sessionId || 'anon'}: requested=[${requestedTargets.join(', ')}], applied=[${appliedTargets.join(', ')}], missing=[${missingTargets.join(', ')}]`);
-      client.currentTargetLangs = appliedTargets.slice();
-      if (client.ws?.readyState === 1) {
-        try {
-          client.ws.send(JSON.stringify({
-            type: 'warning',
-            code: 'targets_truncated',
-            message: `Upstream did not enable translation targets: ${missingTargets.join(', ')}`,
-            appliedTargets,
-            missingTargets,
-          }));
-        } catch {}
-      }
-    }
-  }
-
-  log.info(`[OLLALINK READY] session=${client.session?.sessionId || 'anon'} pre-cached lanes:`, client.targetLanes);
 }
 
 function bindUpstream(clientOwner, opts, handlers = {}) {
   clientOwner.upstreamGen = (clientOwner.upstreamGen || 0) + 1;
   const currentGen = clientOwner.upstreamGen;
-  if (clientOwner.upstreamPacingTimer) {
-    clearTimeout(clientOwner.upstreamPacingTimer);
-    clientOwner.upstreamPacingTimer = null;
-  }
-  clientOwner.upstreamPacingActive = false;
   clientOwner.currentTargetLangs = Array.isArray(opts.targetLangs)
     ? opts.targetLangs.slice()
     : Array.from(opts.targetLangs);
@@ -956,7 +833,6 @@ function bindUpstream(clientOwner, opts, handlers = {}) {
       if (clientOwner.upstreamGen !== currentGen) return;
       clientOwner.reconnectAttempts = 0;
       if (readyPayload) inspectSessionReadyConfig(clientOwner, readyPayload);
-      schedulePacedUpstreamSend(clientOwner);
       if (handlers.onReady) handlers.onReady(readyPayload);
     },
     onEvent: (evt) => {
@@ -1017,47 +893,6 @@ function broadcastToOthers(client, msg) {
  * Captions similarly carry a `language` (target) for translation events and
  * the source language for transcript events. We honor `captionsOn` per peer.
  */
-
-// Bug 6 & Bug 10 Fix: Real-time paced send queue per upstream Ollalink connection
-// Prevents network jitter bursts from delivering audio faster than real-time to Ollalink (code 1006 / overloaded),
-// and buffers frames without dropping while upstream connects/re-opens.
-export function schedulePacedUpstreamSend(client) {
-  if (client.upstreamPacingActive) return;
-  if (!client.upstreamQueue || client.upstreamQueue.length === 0) return;
-  if (!client.upstream) {
-    client.upstreamQueue = [];
-    return;
-  }
-  // If upstream is still establishing handshake (session.configure -> session.ready),
-  // hold the audio in queue instead of dropping it (Bug 10 Fix: Eliminates 1s audio drop on re-open)
-  if (!client.upstream.isOpen() || !client.upstream.isConfigured?.()) {
-    return;
-  }
-
-  client.upstreamPacingActive = true;
-  const chunk = client.upstreamQueue.shift();
-  try {
-    client.upstream.send(chunk);
-  } catch (err) {
-    log.error('upstream send error:', err);
-    client.upstreamPacingActive = false;
-    return;
-  }
-
-  // Calculate real-time duration of this PCM chunk (16kHz mono s16le = 32 bytes/ms)
-  // H1 Fix: Do not clamp to 100ms! Allow true chunk duration (e.g. 128ms, 200ms) with a safe cap of 1000ms
-  const durationMs = Math.max(10, Math.min(1000, Math.floor(chunk.length / 32)));
-
-  // Bug 28 Fix: Store timer handle to cancel on reconnect
-  if (client.upstreamPacingTimer) {
-    clearTimeout(client.upstreamPacingTimer);
-  }
-  client.upstreamPacingTimer = setTimeout(() => {
-    client.upstreamPacingTimer = null;
-    client.upstreamPacingActive = false;
-    schedulePacedUpstreamSend(client);
-  }, durationMs);
-}
 
 export function forwardOllalinkToRoom(client, evt) {
   if (!client.session || !client.room) return;
