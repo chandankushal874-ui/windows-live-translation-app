@@ -13,7 +13,7 @@ const VAD_ONSET_RMS = 0.024;
 const VAD_ONSET_PEAK = 0.045;
 const VAD_CONTINUE_RMS = 0.012;
 const VAD_CONTINUE_PEAK = 0.024;
-const SILENCE_HOLD_MS = 1200;
+const SILENCE_HOLD_MS = 1500;
 const PREROLL_MAX_FRAMES = 6;
 const ONSET_DEBOUNCE_FRAMES = 2;
 
@@ -202,7 +202,7 @@ test('BUG-A FIX: Pre-roll buffer capped at 6 frames (120ms), not 20 (400ms)', ()
 });
 
 // --- Test 8: Silence hold is 1.2s (not 1.5s) ---
-test('BUG-A FIX: Silence hold commits after 1.2 seconds, not 1.5', () => {
+test('BUG-A FIX: Silence hold commits after 1.5 seconds (matching Ollalink endpointing)', () => {
   const vad = createVADSimulator();
   const t0 = Date.now();
 
@@ -215,14 +215,14 @@ test('BUG-A FIX: Silence hold commits after 1.2 seconds, not 1.5', () => {
     vad.processFrame(0.07, 0.10, t0 + 40 + i * 20);
   }
 
-  // Go silent for exactly 1.2s
-  for (let i = 0; i < 60; i++) {
+  // Go silent for exactly 1.5s
+  for (let i = 0; i < 75; i++) {
     vad.processFrame(0.002, 0.003, t0 + 540 + i * 20);
   }
 
   // At 1.2s of silence, commit should have fired
-  assert.ok(vad.commits.length >= 1, 'Commit should fire after 1.2s of silence');
-  assert.equal(vad.isSpeaking, false, 'Should have stopped speaking after 1.2s silence');
+  assert.ok(vad.commits.length >= 1, 'Commit should fire after 1.5s of silence');
+  assert.equal(vad.isSpeaking, false, 'Should have stopped speaking after 1.5s silence');
 });
 
 // --- Test 9: Old threshold (0.008) is completely gone ---

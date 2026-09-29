@@ -596,7 +596,7 @@ wss.on('connection', (ws, req) => {
       client.upstreamQueue = [];
       client.upstreamPacingActive = false;
     }
-    if (client.upstreamQueue.length >= 100) {
+    if (client.upstreamQueue.length >= 250) { // 5 seconds queue buffer
       client.upstreamQueue.shift();
     }
     client.upstreamQueue.push(data);

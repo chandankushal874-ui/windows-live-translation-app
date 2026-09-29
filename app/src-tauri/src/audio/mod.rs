@@ -25,7 +25,7 @@ use jitter::JitterPlayer;
 use resample::Resampler;
 
 /// Ring buffer size in samples. 48kHz * 2 channels * 0.5s = 48000 samples.
-const CAPTURE_RING_SAMPLES: usize = 48000;
+const CAPTURE_RING_SAMPLES: usize = 48000 * 4; // 192,000 samples = 4.0s of elastic headroom @ 48kHz
 
 /// RAII wrapper for a cpal Stream that implements Send.
 pub struct SendStream(pub Stream);
@@ -411,7 +411,7 @@ async fn run_sender_watch(
     let mut is_speaking = false;
     let mut consecutive_speech_frames: usize = 0;
     let mut last_voice_spike = std::time::Instant::now();
-    let silence_hold_duration = std::time::Duration::from_millis(1200);
+    let silence_hold_duration = std::time::Duration::from_millis(1500);
     const VAD_ONSET_RMS: f32 = 0.024;
     const VAD_ONSET_PEAK: f32 = 0.045;
     const VAD_CONTINUE_RMS: f32 = 0.012;
@@ -495,7 +495,6 @@ async fn run_sender_watch(
 
             let is_onset_frame = (rms >= onset_rms && peak >= onset_peak) || (rms >= (onset_rms * 1.45));
             let is_continuing = (rms >= VAD_CONTINUE_RMS) || (peak >= VAD_CONTINUE_PEAK);
-            let frame_duration = std::time::Duration::from_millis(frame_ms.max(1) as u64);
 
             pcm_out.clear();
             for &s in &frame {
@@ -517,17 +516,17 @@ async fn run_sender_watch(
                     let _ = app.emit("speech-active", true);
 
                     // Flush 100-120ms pre-roll buffer so initial consonant plosives are intact
+                    // Bug L3 Fix: Send pre-roll immediately without sleep (pre-roll is historical audio;
+                    // sleeping 120ms here causes ring buffer backlog and drops live mic audio).
                     while let Some(pre_frame) = pre_roll.pop_front() {
                         let _ = relay.send_pcm(&pre_frame).await;
-                        // Bug 3 Fix: Real-time send pacing (caps send rate at 50 fps @ 20ms)
-                        tokio::time::sleep(frame_duration).await;
                     }
+                    // Bug L1 Fix: Drain and send at microphone capture rate without client-side sleep.
+                    // The relay server already paces frames to Ollalink via schedulePacedUpstreamSend.
                     if let Err(e) = relay.send_pcm(&pcm_out).await {
                         tracing::warn!(error = %e, "relay send_pcm failed");
                         break;
                     }
-                    // Bug 3 Fix: Real-time send pacing
-                    tokio::time::sleep(frame_duration).await;
                 } else {
                     // Keep 100-120ms rolling pre-roll buffer (max 6 frames @ 20ms)
                     if pre_roll.len() >= 6 {
@@ -541,15 +540,14 @@ async fn run_sender_watch(
                     last_voice_spike = std::time::Instant::now();
                 }
 
+                // Bug L1 Fix: Send live frame immediately. Hardware microphone dictates real-time rate,
+                // and relay server schedulePacedUpstreamSend protects Ollalink against network bursts.
                 if let Err(e) = relay.send_pcm(&pcm_out).await {
                     tracing::warn!(error = %e, "relay send_pcm failed");
                     break;
                 }
-                // Bug 3 Fix: Real-time send pacing (caps send rate at 50 fps @ 20ms)
-                // Prevents burst draining after CPU spikes / buffer accumulation that triggers Ollalink "overloaded"
-                tokio::time::sleep(frame_duration).await;
 
-                // Check if speaker has paused for 1.2 seconds
+                // Bug L2 Fix: Check if speaker has paused for 1.5 seconds (matching Ollalink server-side endpointing)
                 if last_voice_spike.elapsed() >= silence_hold_duration {
                     is_speaking = false;
                     consecutive_speech_frames = 0;
@@ -559,9 +557,7 @@ async fn run_sender_watch(
                 }
             }
 
-            if pending.len() >= frame_samples {
-                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-            }
+
         }
 
         let peak = scratch.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
