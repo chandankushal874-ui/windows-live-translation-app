@@ -511,7 +511,7 @@ wss.on('connection', (ws, req) => {
             sourceLang: src,
             targetLangs: newTargets,
             sessionToken: msg.token ?? '',
-            silenceMs: 600,
+            silenceMs: 1500,
             voice: client.session.voice,
             tone: client.session.tone,
           },

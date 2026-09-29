@@ -208,7 +208,7 @@ export function openOllalinkStream(args, handlers) {
   upstream.on('open', () => {
     state.opened = true;
     log.info('ollalink ws open');
-    upstream.send(buildConfig({ ...args, silenceMs: args.silenceMs || 600 }), (err) => {
+    upstream.send(buildConfig({ ...args, silenceMs: args.silenceMs || 1500 }), (err) => {
       if (err) handlers.onError?.(err);
       // Bug 31 Fix: Do NOT set state.configured = true or call onReady here!
       // Must wait for session.ready from Ollalink before marking configured.
