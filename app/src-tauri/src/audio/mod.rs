@@ -15,7 +15,6 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, Host, SampleFormat, Stream, StreamConfig};
 use parking_lot::Mutex;
 use ringbuf::{traits::*, HeapRb};
-use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter};
@@ -24,24 +23,18 @@ use crate::ws::RelaySocket;
 use jitter::JitterPlayer;
 use resample::Resampler;
 
-/// Ring buffer size in samples. 48kHz * 2 channels * 0.5s = 48000 samples.
-const CAPTURE_RING_SAMPLES: usize = 48000 * 4; // 192,000 samples = 4.0s of elastic headroom @ 48kHz
+/// Ring buffer size in samples. 48kHz * 1 channel * 2.0s = 96000 samples.
+const CAPTURE_RING_SAMPLES: usize = 96000;
 
 /// RAII wrapper for a cpal Stream that implements Send.
 pub struct SendStream(pub Stream);
 unsafe impl Send for SendStream {}
-
 impl std::ops::Deref for SendStream {
     type Target = Stream;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
+    fn deref(&self) -> &Self::Target { &self.0 }
 }
-
 impl std::ops::DerefMut for SendStream {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
 }
 
 #[derive(Debug, Clone)]
@@ -54,27 +47,21 @@ pub struct AudioPipelineConfig {
 }
 
 pub struct AudioPipeline {
-    // Mutable stream handles. Swapped atomically on hot-swap.
     input_stream: Mutex<Option<SendStream>>,
     output_stream: Mutex<Option<SendStream>>,
-
-    // The input ring is a split SPSC pair; swap_input_device signals the sender
-    // task to swap its consumer and update the native sample rate via this channel.
     input_ring_tx: tokio::sync::mpsc::UnboundedSender<(ringbuf::HeapCons<f32>, u32)>,
     #[allow(dead_code)]
     ring_prod_parked: Mutex<Option<ringbuf::HeapProd<f32>>>,
-
     #[allow(dead_code)]
     relay: RelaySocket,
     app: AppHandle,
-
     running: Arc<AtomicBool>,
     input_gain: Arc<AtomicU32>,
-    mic_muted: Arc<AtomicBool>,
     sender_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     playback_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     jitter: Arc<JitterPlayer>,
     cfg: AudioPipelineConfig,
+    mic_muted: Arc<AtomicBool>,
 }
 
 impl AudioPipeline {
@@ -88,12 +75,10 @@ impl AudioPipeline {
         let mic_muted = Arc::new(AtomicBool::new(false));
         let (prod, cons) = HeapRb::<f32>::new(CAPTURE_RING_SAMPLES).split();
 
-        // Open initial input stream
         let (input_stream, in_rate, in_ch) =
             open_input_stream(cfg.input_device.as_deref(), prod, running.clone(), input_gain.clone(), mic_muted.clone(), Some(app.clone()))?;
         input_stream.play().context("start input stream")?;
 
-        // Discover output device's native rate/channels before constructing the player
         let (out_rate, out_ch) = {
             let host = cpal::default_host();
             let dev = pick_output_device(&host, cfg.output_device.as_deref())?;
@@ -101,7 +86,6 @@ impl AudioPipeline {
             (dcfg.sample_rate().0, dcfg.channels() as usize)
         };
 
-        // Shared jitter player: playback task pushes, output callback pulls.
         let jitter = Arc::new(JitterPlayer::new(out_rate, out_ch, cfg.jitter_buffer_ms));
 
         let (output_stream, out_rate_actual, out_ch_actual) =
@@ -111,25 +95,23 @@ impl AudioPipeline {
         }
         output_stream.play().context("start output stream")?;
 
-        // Sender task: ring -> resample -> relay.
         let (ring_tx, ring_rx) = tokio::sync::mpsc::unbounded_channel();
         let sender_task = {
             let relay = relay.clone();
             let app = app.clone();
             let running = running.clone();
             let target_rate = cfg.sample_rate;
-            let frame_ms = cfg.frame_ms;
+            let chunk_ms = 500; // 0.5s chunks per Ollalink docs
             let jitter = jitter.clone();
             let mic_muted = mic_muted.clone();
             tokio::spawn(async move {
-                if let Err(e) = run_sender_watch(cons, ring_rx, in_rate, in_ch, target_rate, frame_ms, relay, app.clone(), running, jitter, mic_muted).await {
+                if let Err(e) = run_sender_watch(cons, ring_rx, in_rate, in_ch, target_rate, chunk_ms, relay, app.clone(), running, jitter, mic_muted).await {
                     tracing::error!(error=%e, "sender task failed");
                     let _ = app.emit("audio-error", e.to_string());
                 }
             })
         };
 
-        // Playback task: relay -> jitter
         let playback_task = {
             let relay = relay.clone();
             let jitter = jitter.clone();
@@ -142,8 +124,6 @@ impl AudioPipeline {
                                 jitter.push_audio_with_rate(audio_bytes, sr).await;
                             }
                             if is_last {
-                                // Utterance ended: flush resamplers so trapped residual samples
-                                // are emitted immediately and cannot burst into the next sentence
                                 jitter.flush_resamplers().await;
                             }
                         }
@@ -162,73 +142,51 @@ impl AudioPipeline {
             app,
             running,
             input_gain,
-            mic_muted,
             sender_task: Mutex::new(Some(sender_task)),
             playback_task: Mutex::new(Some(playback_task)),
             jitter,
             cfg,
+            mic_muted: mic_muted.clone(),
         }))
-    }
-
-    pub fn set_mic_muted(&self, muted: bool) {
-        self.mic_muted.store(muted, Ordering::Relaxed);
     }
 
     pub fn set_input_gain(&self, v: f32) {
         self.input_gain.store(v.clamp(0.0, 2.0).to_bits(), Ordering::Relaxed);
     }
 
-    /// Gracefully stop.
-    pub async fn stop(&self) {
-        self.running.store(false, Ordering::Relaxed);
-
-        if let Some(s) = self.input_stream.lock().take() {
-            let _ = s.pause();
-        }
-        let playback_task = self.playback_task.lock().take();
-        if let Some(t) = playback_task {
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(500), t).await;
-        }
-        if let Some(s) = self.output_stream.lock().take() {
-            let _ = s.pause();
-        }
-        let sender_task = self.sender_task.lock().take();
-        if let Some(t) = sender_task {
-            let _ = tokio::time::timeout(std::time::Duration::from_millis(200), t).await;
-        }
+    pub fn set_mic_muted(&self, muted: bool) {
+        self.mic_muted.store(muted, Ordering::Relaxed);
     }
 
-    /// Hot-swap the input device mid-call.
+    pub async fn stop(&self) {
+        self.running.store(false, Ordering::Relaxed);
+        if let Some(s) = self.input_stream.lock().take() { let _ = s.pause(); }
+        let playback_task = self.playback_task.lock().take();
+        if let Some(t) = playback_task { let _ = tokio::time::timeout(std::time::Duration::from_millis(500), t).await; }
+        if let Some(s) = self.output_stream.lock().take() { let _ = s.pause(); }
+        let sender_task = self.sender_task.lock().take();
+        if let Some(t) = sender_task { let _ = tokio::time::timeout(std::time::Duration::from_millis(200), t).await; }
+    }
+
     pub async fn swap_input_device(&self, name: Option<String>) -> Result<()> {
-        if let Some(s) = self.input_stream.lock().take() {
-            let _ = s.pause();
-        }
+        if let Some(s) = self.input_stream.lock().take() { let _ = s.pause(); }
         let (new_prod, new_cons) = HeapRb::<f32>::new(CAPTURE_RING_SAMPLES).split();
         let (new_stream, rate, _ch) = open_input_stream(
             name.as_deref().or(self.cfg.input_device.as_deref()),
-            new_prod,
-            self.running.clone(),
-            self.input_gain.clone(),
-            self.mic_muted.clone(),
+            new_prod, self.running.clone(), self.input_gain.clone(), Arc::new(AtomicBool::new(false)),
             Some(self.app.clone()),
         )?;
         new_stream.play().context("restart input stream")?;
-
         *self.input_stream.lock() = Some(SendStream(new_stream));
         let _ = self.input_ring_tx.send((new_cons, rate));
         Ok(())
     }
 
-    /// Hot-swap the output device mid-call (RS-04 fix).
     pub async fn swap_output_device(&self, name: Option<String>) -> Result<()> {
-        if let Some(s) = self.output_stream.lock().take() {
-            let _ = s.pause();
-        }
+        if let Some(s) = self.output_stream.lock().take() { let _ = s.pause(); }
         let (new_stream, rate, ch) = open_output_stream(
             name.as_deref().or(self.cfg.output_device.as_deref()),
-            self.cfg.jitter_buffer_ms,
-            self.jitter.clone(),
-            Some(self.app.clone()),
+            self.cfg.jitter_buffer_ms, self.jitter.clone(), Some(self.app.clone()),
         )?;
         self.jitter.update_output_config(rate, ch);
         new_stream.play().context("restart output stream")?;
@@ -244,9 +202,7 @@ impl AudioPipeline {
 fn pick_input_device(host: &Host, name: Option<&str>) -> Result<Device> {
     if let Some(n) = name {
         for d in host.input_devices()? {
-            if d.name().map(|nm| nm == n).unwrap_or(false) {
-                return Ok(d);
-            }
+            if d.name().map(|nm| nm == n).unwrap_or(false) { return Ok(d); }
         }
     }
     host.default_input_device().context("no default input device")
@@ -255,21 +211,15 @@ fn pick_input_device(host: &Host, name: Option<&str>) -> Result<Device> {
 fn pick_output_device(host: &Host, name: Option<&str>) -> Result<Device> {
     if let Some(n) = name {
         for d in host.output_devices()? {
-            if d.name().map(|nm| nm == n).unwrap_or(false) {
-                return Ok(d);
-            }
+            if d.name().map(|nm| nm == n).unwrap_or(false) { return Ok(d); }
         }
     }
     host.default_output_device().context("no default output device")
 }
 
 fn open_input_stream(
-    name: Option<&str>,
-    ring: ringbuf::HeapProd<f32>,
-    running: Arc<AtomicBool>,
-    gain: Arc<AtomicU32>,
-    mic_muted: Arc<AtomicBool>,
-    app: Option<AppHandle>,
+    name: Option<&str>, ring: ringbuf::HeapProd<f32>, running: Arc<AtomicBool>,
+    gain: Arc<AtomicU32>, mic_muted: Arc<AtomicBool>, app: Option<AppHandle>,
 ) -> Result<(Stream, u32, usize)> {
     let host = cpal::default_host();
     let device = pick_input_device(&host, name)?;
@@ -283,10 +233,7 @@ fn open_input_stream(
     let err_fn = move |e: cpal::StreamError| {
         tracing::error!(error=%e, "input stream error");
         if let Some(ref a) = app_in {
-            let _ = a.emit("audio-device-lost", serde_json::json!({
-                "kind": "input",
-                "error": e.to_string(),
-            }));
+            let _ = a.emit("audio-device-lost", serde_json::json!({ "kind": "input", "error": e.to_string() }));
         }
     };
     let mut ring_mut = ring;
@@ -296,23 +243,21 @@ fn open_input_stream(
             device.build_input_stream(
                 &sconfig,
                 move |data: &[$t], _| {
-                    if !running.load(Ordering::Relaxed) || mic_muted.load(Ordering::Relaxed) { return; }
+                    if !running.load(Ordering::Relaxed) { return; }
+                    if mic_muted.load(Ordering::Relaxed) { return; }
                     let g = f32::from_bits(gain.load(Ordering::Relaxed));
                     if channels == 1 {
                         for &s in data {
                             let _ = ring_mut.try_push(<f32 as cpal::FromSample<$t>>::from_sample_(s) * g);
                         }
                     } else {
-                        // For stereo / array mics (Intel Smart Sound, Realtek Array),
-                        // take the primary front capsule (channel 0) to avoid destructive phase cancellation.
                         for chunk in data.chunks_exact(channels) {
                             let s = <f32 as cpal::FromSample<$t>>::from_sample_(chunk[0]);
                             let _ = ring_mut.try_push(s * g);
                         }
                     }
                 },
-                err_fn,
-                None,
+                err_fn, None,
             )
         };
     }
@@ -327,10 +272,7 @@ fn open_input_stream(
 }
 
 fn open_output_stream(
-    name: Option<&str>,
-    jitter_ms: u32,
-    jitter: Arc<JitterPlayer>,
-    app: Option<AppHandle>,
+    name: Option<&str>, jitter_ms: u32, jitter: Arc<JitterPlayer>, app: Option<AppHandle>,
 ) -> Result<(Stream, u32, usize)> {
     let host = cpal::default_host();
     let device = pick_output_device(&host, name)?;
@@ -346,25 +288,18 @@ fn open_output_stream(
     let err_fn = move |e: cpal::StreamError| {
         tracing::error!(error=%e, "output stream error");
         if let Some(ref a) = app_out {
-            let _ = a.emit("audio-device-lost", serde_json::json!({
-                "kind": "output",
-                "error": e.to_string(),
-            }));
+            let _ = a.emit("audio-device-lost", serde_json::json!({ "kind": "output", "error": e.to_string() }));
         }
     };
     macro_rules! build {
         ($t:ty) => {
             device.build_output_stream(
                 &sconfig,
-                move |data: &mut [$t], _| {
-                    jitter_for_cb.fill_into(data);
-                },
-                err_fn,
-                None,
+                move |data: &mut [$t], _| { jitter_for_cb.fill_into(data); },
+                err_fn, None,
             )
         };
     }
-
     let stream = match fmt {
         SampleFormat::F32 => build!(f32)?,
         SampleFormat::I16 => build!(i16)?,
@@ -375,7 +310,7 @@ fn open_output_stream(
 }
 
 // ---------------------------------------------------------------------------
-// Sender task
+// Sender task — dumb pipe per Ollalink docs
 // ---------------------------------------------------------------------------
 
 async fn run_sender_watch(
@@ -384,54 +319,27 @@ async fn run_sender_watch(
     mut in_rate: u32,
     _in_channels: usize,
     target_rate: u32,
-    frame_ms: u32,
+    chunk_ms: u32,
     relay: RelaySocket,
     app: AppHandle,
     running: Arc<AtomicBool>,
-    jitter: Arc<JitterPlayer>,
+    _jitter: Arc<JitterPlayer>,
     mic_muted: Arc<AtomicBool>,
 ) -> Result<()> {
-    let frame_samples = (target_rate as usize * frame_ms as usize) / 1000;
+    // Dumb-pipe sender per Ollalink docs:
+    // "stream 16kHz mono s16le PCM binary frames (~0.5s each), paced at real time"
+    // No client-side VAD, no pre-roll, no audio.commit — Ollalink's endpointing.silence_ms handles all segmentation.
+    let chunk_samples = (target_rate as usize * chunk_ms as usize) / 1000;
+    let chunk_duration = std::time::Duration::from_millis(chunk_ms as u64);
     let mut resampler = Resampler::new(in_rate, target_rate)?;
-    let mut scratch = Vec::<f32>::with_capacity(frame_samples * 4);
-    let mut pcm_out = Vec::<u8>::with_capacity(frame_samples * 2);
-    let mut pending: Vec<f32> = Vec::with_capacity(frame_samples * 4);
-    let mut dropped_overflow_samples: u64 = 0;
-    let mut last_overflow_log = std::time::Instant::now();
-
-    // Utterance Voice Activity Detection (VAD) & Segmentation:
-    // 1. Thresholds: Onset requires RMS >= 0.024 and Peak >= 0.045 (or strong RMS >= 0.035).
-    // 2. Debounce: Requires 2 consecutive frames (40ms) of sustained energy to confirm speech onset,
-    //    completely filtering out isolated mouse clicks, keyboard clacks, and fan hum.
-    // 3. Pre-roll: Modest 100-120ms (6 frames @ 20ms) preserves initial consonant plosives
-    //    without dumping 400ms of room noise into Whisper.
-    // 4. Hangover: Once active, maintains stream while RMS >= 0.012 or Peak >= 0.024;
-    //    commits after 1.2s of silence.
-    let mut pre_roll: VecDeque<Vec<u8>> = VecDeque::with_capacity(10);
-    let mut is_speaking = false;
-    let mut consecutive_speech_frames: usize = 0;
-    let mut last_voice_spike = std::time::Instant::now();
-    let silence_hold_duration = std::time::Duration::from_millis(1500);
-    const VAD_ONSET_RMS: f32 = 0.024;
-    const VAD_ONSET_PEAK: f32 = 0.045;
-    const VAD_CONTINUE_RMS: f32 = 0.012;
-    const VAD_CONTINUE_PEAK: f32 = 0.024;
+    let mut pending: Vec<f32> = Vec::with_capacity(chunk_samples * 2);
 
     while running.load(Ordering::Relaxed) {
         if mic_muted.load(Ordering::Relaxed) {
-            if is_speaking {
-                is_speaking = false;
-                consecutive_speech_frames = 0;
-                pre_roll.clear();
-                let _ = app.emit("speech-active", false);
-            }
-            pending.clear();
-            scratch.clear();
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             continue;
         }
 
-        // Pull latest consumer & sample rate on device hot-swap
         if let Ok((new_cons, new_rate)) = ring_rx.try_recv() {
             ring = new_cons;
             if new_rate != in_rate {
@@ -446,139 +354,45 @@ async fn run_sender_watch(
         let available = ring.occupied_len();
         if available == 0 {
             tokio::select! {
-                _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {}
+                _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {}
                 maybe_new = ring_rx.recv() => {
                     match maybe_new {
                         Some((new_cons, new_rate)) => {
                             ring = new_cons;
                             if new_rate != in_rate {
-                                tracing::info!(old = in_rate, new = new_rate, "updating resampler for swapped device");
                                 in_rate = new_rate;
                                 if let Ok(new_resampler) = Resampler::new(new_rate, target_rate) {
                                     resampler = new_resampler;
                                 }
                             }
                         }
-                        None => { break; }
+                        None => break,
                     }
                 }
             }
             continue;
         }
 
-        scratch.clear();
-        scratch.extend(ring.pop_iter().take(available));
-
-        // Resample clean microphone stream without artificial silence muting
-        let resampled = resampler.process(&scratch)?;
+        let raw: Vec<f32> = ring.pop_iter().take(available).collect();
+        let resampled = resampler.process(&raw)?;
         pending.extend_from_slice(&resampled);
 
-        // Bug D1 & D3 Fix: Prevent unbounded memory growth and latency death spirals.
-        // Hard-cap pending backlog to at most 1.0s (16,000 samples @ 16kHz).
-        // If a system stall or network pause ever backs up audio, prune stale head samples immediately.
-        const MAX_PENDING_SAMPLES: usize = 16000;
-        if pending.len() > MAX_PENDING_SAMPLES {
-            let excess = pending.len() - MAX_PENDING_SAMPLES;
-            pending.drain(..excess);
-            tracing::warn!(dropped_excess = excess, "pruned stale pending audio backlog to prevent latency buildup");
-        }
+        let peak = raw.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+        let _ = app.emit("vu-meter", peak);
 
-        // Process equal-sized 16kHz s16le PCM frames
-        while pending.len() >= frame_samples {
-            let frame: Vec<f32> = pending.drain(..frame_samples).collect();
-            
-            // Calculate RMS and Peak energy for voice detection
-            let sum_sq: f32 = frame.iter().map(|&x| x * x).sum();
-            let rms = (sum_sq / frame.len() as f32).sqrt();
-            let peak = frame.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
-
-            // Bug 2 Fix: Acoustic Echo Suppression
-            // While jitter buffer is actively outputting sound to speakers, raise VAD onset threshold to 3x (0.072 RMS).
-            // This blocks speaker bleedback on laptop mics from triggering phantom feedback loops,
-            // while real speech (5-10x louder than bleed) triggers normally.
-            let is_speaker_playing = jitter.is_playing();
-            let (onset_rms, onset_peak) = if is_speaker_playing {
-                (VAD_ONSET_RMS * 3.0, VAD_ONSET_PEAK * 3.0) // 0.072 RMS, 0.135 Peak
-            } else {
-                (VAD_ONSET_RMS, VAD_ONSET_PEAK)             // 0.024 RMS, 0.045 Peak
-            };
-
-            let is_onset_frame = (rms >= onset_rms && peak >= onset_peak) || (rms >= (onset_rms * 1.45));
-            let is_continuing = (rms >= VAD_CONTINUE_RMS) || (peak >= VAD_CONTINUE_PEAK);
-
-            pcm_out.clear();
+        // Send complete 0.5s chunks at real time. Discard partial remainder (next iteration fills it).
+        while pending.len() >= chunk_samples {
+            let frame: Vec<f32> = pending.drain(..chunk_samples).collect();
+            let mut pcm_out = Vec::with_capacity(chunk_samples * 2);
             for &s in &frame {
                 let s16 = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
                 pcm_out.extend_from_slice(&s16.to_le_bytes());
             }
-
-            if !is_speaking {
-                if is_onset_frame {
-                    consecutive_speech_frames += 1;
-                } else {
-                    consecutive_speech_frames = 0;
-                }
-
-                if consecutive_speech_frames >= 2 {
-                    // Confirmed speech onset (2 consecutive frames of voice energy)
-                    is_speaking = true;
-                    last_voice_spike = std::time::Instant::now();
-                    let _ = app.emit("speech-active", true);
-
-                    // Flush 100-120ms pre-roll buffer so initial consonant plosives are intact
-                    // Bug L3 Fix: Send pre-roll immediately without sleep (pre-roll is historical audio;
-                    // sleeping 120ms here causes ring buffer backlog and drops live mic audio).
-                    while let Some(pre_frame) = pre_roll.pop_front() {
-                        let _ = relay.send_pcm(&pre_frame).await;
-                    }
-                    // Bug L1 Fix: Drain and send at microphone capture rate without client-side sleep.
-                    // The relay server already paces frames to Ollalink via schedulePacedUpstreamSend.
-                    if let Err(e) = relay.send_pcm(&pcm_out).await {
-                        tracing::warn!(error = %e, "relay send_pcm failed");
-                        break;
-                    }
-                } else {
-                    // Keep 100-120ms rolling pre-roll buffer (max 6 frames @ 20ms)
-                    if pre_roll.len() >= 6 {
-                        pre_roll.pop_front();
-                    }
-                    pre_roll.push_back(pcm_out.clone());
-                }
-            } else {
-                // Actively speaking
-                if is_continuing {
-                    last_voice_spike = std::time::Instant::now();
-                }
-
-                // Bug L1 Fix: Send live frame immediately. Hardware microphone dictates real-time rate,
-                // and relay server schedulePacedUpstreamSend protects Ollalink against network bursts.
-                if let Err(e) = relay.send_pcm(&pcm_out).await {
-                    tracing::warn!(error = %e, "relay send_pcm failed");
-                    break;
-                }
-
-                // Bug L2 Fix: Check if speaker has paused for 1.5 seconds (matching Ollalink server-side endpointing)
-                if last_voice_spike.elapsed() >= silence_hold_duration {
-                    is_speaking = false;
-                    consecutive_speech_frames = 0;
-                    let _ = relay.send_json(serde_json::json!({ "type": "audio.commit" })).await;
-                    let _ = app.emit("speech-active", false);
-                    pre_roll.clear();
-                }
+            if let Err(e) = relay.send_pcm(&pcm_out).await {
+                tracing::warn!(error = %e, "relay send_pcm failed");
+                break;
             }
-
-
-        }
-
-        let peak = scratch.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
-        let _ = app.emit("vu-meter", peak);
-
-        if last_overflow_log.elapsed().as_secs() >= 5 {
-            if dropped_overflow_samples > 0 {
-                tracing::warn!(dropped = dropped_overflow_samples, "capture overflow dropped samples");
-                dropped_overflow_samples = 0;
-            }
-            last_overflow_log = std::time::Instant::now();
+            tokio::time::sleep(chunk_duration).await;
         }
     }
     Ok(())

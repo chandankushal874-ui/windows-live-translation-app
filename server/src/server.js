@@ -511,7 +511,7 @@ wss.on('connection', (ws, req) => {
             sourceLang: src,
             targetLangs: newTargets,
             sessionToken: msg.token ?? '',
-            silenceMs: 1500,
+            silenceMs: 600,
             voice: client.session.voice,
             tone: client.session.tone,
           },
@@ -590,17 +590,10 @@ wss.on('connection', (ws, req) => {
       return; // unknown JSON frame; ignore
     }
 
-    // Binary PCM from client -> queue for real-time paced transmission to Ollalink (Bug 6 & 10 Fix)
-    if (!client.upstream) return;
-    if (!client.upstreamQueue) {
-      client.upstreamQueue = [];
-      client.upstreamPacingActive = false;
-    }
-    if (client.upstreamQueue.length >= 250) { // 5 seconds queue buffer
-      client.upstreamQueue.shift();
-    }
-    client.upstreamQueue.push(data);
-    schedulePacedUpstreamSend(client);
+    // Binary PCM from client -> forward immediately to Ollalink.
+    // Client already paces at real time (0.5s chunks per Ollalink docs). No server-side queue needed.
+    if (!client.upstream?.isOpen()) return;
+    try { client.upstream.send(data); } catch { /* ignore */ }
   });
 
   ws.on('close', () => {
