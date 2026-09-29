@@ -165,13 +165,13 @@ test('lang.change re-opens upstream + notifies peers', async () => {
   const bob = await joinCallWs('bob', 'hi', 'en', room.code);
 
   const bobNotified = waitForType(bob.ws, 'peer-lang-changed');
-  alice.ws.send(JSON.stringify({ type: 'lang.change', sourceLang: 'en', targetLang: 'ta' }));
+  alice.ws.send(JSON.stringify({ type: 'lang.change', sourceLang: 'en', targetLang: 'de' }));
 
   const ack = await waitForType(alice.ws, 'lang.changed');
-  assert.equal(ack.targetLang, 'ta');
+  assert.equal(ack.targetLang, 'de');
   const peerNotif = await bobNotified;
   assert.equal(peerNotif.sessionId, alice.joined.self.sessionId);
-  assert.equal(peerNotif.targetLang, 'ta');
+  assert.equal(peerNotif.targetLang, 'de');
   alice.ws.close(); bob.ws.close();
 });
 

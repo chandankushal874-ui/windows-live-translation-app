@@ -25,7 +25,7 @@ if (!process.env.OLLALINK_WS_URL) {
 }
 
 // 4. Auto-detect Cloud Public Hostname (Render injects RENDER_EXTERNAL_HOSTNAME)
-if (!process.env.PUBLIC_BASE) {
+if (!process.env.PUBLIC_BASE || (process.env.RENDER_EXTERNAL_HOSTNAME && (process.env.PUBLIC_BASE.includes('localhost') || process.env.PUBLIC_BASE.includes('127.0.0.1')))) {
   if (process.env.RENDER_EXTERNAL_HOSTNAME) {
     process.env.PUBLIC_BASE = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`;
   } else if (process.env.RAILWAY_PUBLIC_DOMAIN) {

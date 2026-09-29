@@ -44,7 +44,25 @@ before(async () => {
   fakeUpstream = new WebSocketServer({ port: FAKE_PORT });
   fakeUpstream.on('connection', (ws, req) => {
     const sess = { ws, req, received: [], closed: false };
-    ws.on('message', (data, isBinary) => sess.received.push({ isBinary, data }));
+    ws.on('message', (data, isBinary) => {
+      sess.received.push({ isBinary, data });
+      if (!isBinary) {
+        try {
+          const parsed = JSON.parse(data.toString());
+          if (parsed.type === 'session.configure') {
+            ws.send(JSON.stringify({
+              type: 'session.ready',
+              capabilities: ['transcription', 'translation', 'tts'],
+              translation_targets: parsed.translation?.targets ?? [],
+              tts_voice: parsed.tts?.voice ?? 'nh-m01',
+              config_applied: {
+                tts: { lanes: { hi: 'stream', en: 'stream' } },
+              },
+            }));
+          }
+        } catch {}
+      }
+    });
     ws.on('close', () => { sess.closed = true; });
     fakeSessions.push(sess);
   });

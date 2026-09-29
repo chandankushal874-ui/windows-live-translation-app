@@ -117,8 +117,9 @@ impl AudioPipeline {
             let running = running.clone();
             let target_rate = cfg.sample_rate;
             let frame_ms = cfg.frame_ms;
+            let jitter = jitter.clone();
             tokio::spawn(async move {
-                if let Err(e) = run_sender_watch(cons, ring_rx, in_rate, in_ch, target_rate, frame_ms, relay, app.clone(), running).await {
+                if let Err(e) = run_sender_watch(cons, ring_rx, in_rate, in_ch, target_rate, frame_ms, relay, app.clone(), running, jitter).await {
                     tracing::error!(error=%e, "sender task failed");
                     let _ = app.emit("audio-error", e.to_string());
                 }
@@ -377,6 +378,7 @@ async fn run_sender_watch(
     relay: RelaySocket,
     app: AppHandle,
     running: Arc<AtomicBool>,
+    jitter: Arc<JitterPlayer>,
 ) -> Result<()> {
     let frame_samples = (target_rate as usize * frame_ms as usize) / 1000;
     let mut resampler = Resampler::new(in_rate, target_rate)?;
@@ -386,14 +388,23 @@ async fn run_sender_watch(
     let mut dropped_overflow_samples: u64 = 0;
     let mut last_overflow_log = std::time::Instant::now();
 
-    // Utterance Voice Spike Segmentation:
-    // Holds 400ms pre-roll audio so initial consonants are never clipped.
-    // When a voice spike occurs, audio streams continuously.
-    // When there is NO voice spike for 1.5 seconds (1500ms), speaker has finished speaking.
-    let mut pre_roll: VecDeque<Vec<u8>> = VecDeque::with_capacity(25);
+    // Utterance Voice Activity Detection (VAD) & Segmentation:
+    // 1. Thresholds: Onset requires RMS >= 0.024 and Peak >= 0.045 (or strong RMS >= 0.035).
+    // 2. Debounce: Requires 2 consecutive frames (40ms) of sustained energy to confirm speech onset,
+    //    completely filtering out isolated mouse clicks, keyboard clacks, and fan hum.
+    // 3. Pre-roll: Modest 100-120ms (6 frames @ 20ms) preserves initial consonant plosives
+    //    without dumping 400ms of room noise into Whisper.
+    // 4. Hangover: Once active, maintains stream while RMS >= 0.012 or Peak >= 0.024;
+    //    commits after 1.2s of silence.
+    let mut pre_roll: VecDeque<Vec<u8>> = VecDeque::with_capacity(10);
     let mut is_speaking = false;
+    let mut consecutive_speech_frames: usize = 0;
     let mut last_voice_spike = std::time::Instant::now();
-    let silence_hold_duration = std::time::Duration::from_millis(1500);
+    let silence_hold_duration = std::time::Duration::from_millis(1200);
+    const VAD_ONSET_RMS: f32 = 0.024;
+    const VAD_ONSET_PEAK: f32 = 0.045;
+    const VAD_CONTINUE_RMS: f32 = 0.012;
+    const VAD_CONTINUE_PEAK: f32 = 0.024;
 
     while running.load(Ordering::Relaxed) {
         // Pull latest consumer & sample rate on device hot-swap
@@ -442,11 +453,25 @@ async fn run_sender_watch(
         while pending.len() >= frame_samples {
             let frame: Vec<f32> = pending.drain(..frame_samples).collect();
             
-            // Calculate RMS and Peak energy for voice spike detection
+            // Calculate RMS and Peak energy for voice detection
             let sum_sq: f32 = frame.iter().map(|&x| x * x).sum();
             let rms = (sum_sq / frame.len() as f32).sqrt();
             let peak = frame.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
-            let has_voice_spike = (rms >= 0.008f32) || (peak >= 0.018f32);
+
+            // Bug 2 Fix: Acoustic Echo Suppression
+            // While jitter buffer is actively outputting sound to speakers, raise VAD onset threshold to 3x (0.072 RMS).
+            // This blocks speaker bleedback on laptop mics from triggering phantom feedback loops,
+            // while real speech (5-10x louder than bleed) triggers normally.
+            let is_speaker_playing = jitter.is_playing();
+            let (onset_rms, onset_peak) = if is_speaker_playing {
+                (VAD_ONSET_RMS * 3.0, VAD_ONSET_PEAK * 3.0) // 0.072 RMS, 0.135 Peak
+            } else {
+                (VAD_ONSET_RMS, VAD_ONSET_PEAK)             // 0.024 RMS, 0.045 Peak
+            };
+
+            let is_onset_frame = (rms >= onset_rms && peak >= onset_peak) || (rms >= (onset_rms * 1.45));
+            let is_continuing = (rms >= VAD_CONTINUE_RMS) || (peak >= VAD_CONTINUE_PEAK);
+            let frame_duration = std::time::Duration::from_millis(frame_ms.max(1) as u64);
 
             pcm_out.clear();
             for &s in &frame {
@@ -455,30 +480,40 @@ async fn run_sender_watch(
             }
 
             if !is_speaking {
-                if has_voice_spike {
-                    // Speaker has started speaking!
+                if is_onset_frame {
+                    consecutive_speech_frames += 1;
+                } else {
+                    consecutive_speech_frames = 0;
+                }
+
+                if consecutive_speech_frames >= 2 {
+                    // Confirmed speech onset (2 consecutive frames of voice energy)
                     is_speaking = true;
                     last_voice_spike = std::time::Instant::now();
                     let _ = app.emit("speech-active", true);
 
-                    // Flush pre-roll buffer so initial words/consonants are 100% intact
+                    // Flush 100-120ms pre-roll buffer so initial consonant plosives are intact
                     while let Some(pre_frame) = pre_roll.pop_front() {
                         let _ = relay.send_pcm(&pre_frame).await;
+                        // Bug 3 Fix: Real-time send pacing (caps send rate at 50 fps @ 20ms)
+                        tokio::time::sleep(frame_duration).await;
                     }
                     if let Err(e) = relay.send_pcm(&pcm_out).await {
                         tracing::warn!(error = %e, "relay send_pcm failed");
                         break;
                     }
+                    // Bug 3 Fix: Real-time send pacing
+                    tokio::time::sleep(frame_duration).await;
                 } else {
-                    // Keep 400ms rolling pre-roll buffer
-                    if pre_roll.len() >= 20 {
+                    // Keep 100-120ms rolling pre-roll buffer (max 6 frames @ 20ms)
+                    if pre_roll.len() >= 6 {
                         pre_roll.pop_front();
                     }
                     pre_roll.push_back(pcm_out.clone());
                 }
             } else {
-                // Speaker is in the middle of talking
-                if has_voice_spike {
+                // Actively speaking
+                if is_continuing {
                     last_voice_spike = std::time::Instant::now();
                 }
 
@@ -486,10 +521,14 @@ async fn run_sender_watch(
                     tracing::warn!(error = %e, "relay send_pcm failed");
                     break;
                 }
+                // Bug 3 Fix: Real-time send pacing (caps send rate at 50 fps @ 20ms)
+                // Prevents burst draining after CPU spikes / buffer accumulation that triggers Ollalink "overloaded"
+                tokio::time::sleep(frame_duration).await;
 
-                // Check if speaker has paused for 1.5 seconds (no voice spike for 1500ms)
+                // Check if speaker has paused for 1.2 seconds
                 if last_voice_spike.elapsed() >= silence_hold_duration {
                     is_speaking = false;
+                    consecutive_speech_frames = 0;
                     let _ = relay.send_json(serde_json::json!({ "type": "audio.commit" })).await;
                     let _ = app.emit("speech-active", false);
                     pre_roll.clear();

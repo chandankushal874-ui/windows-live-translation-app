@@ -11,9 +11,9 @@
       5. Automatically hosts local Relay Server (port 8787)
       6. Automatically launches Ollalink Translate Desktop App (Landing Page)
 .USAGE
-    powershell -ExecutionPolicy Bypass -File .\install-dependencies.ps1
-    powershell -ExecutionPolicy Bypass -File .\install-dependencies.ps1 -NonInteractive
-    powershell -ExecutionPolicy Bypass -File .\install-dependencies.ps1 -NoLaunch
+    powershell -ExecutionPolicy RemoteSigned -File .\install-dependencies.ps1
+    powershell -ExecutionPolicy RemoteSigned -File .\install-dependencies.ps1 -NonInteractive
+    powershell -ExecutionPolicy RemoteSigned -File .\install-dependencies.ps1 -NoLaunch
 #>
 
 [CmdletBinding()]
@@ -317,3 +317,38 @@ Write-Host "  * Localhost Relay:  http://localhost:8787 (ONLINE)" -ForegroundCol
 Write-Host "  * Desktop App:      Displaying Landing Page (Host & Join)" -ForegroundColor White
 Write-Host ""
 exit 0
+
+# SIG # Begin signature block
+# MIIF+wYJKoZIhvcNAQcCoIIF7DCCBegCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDcvQ1iIe01dT4H
+# E+3j6ME2lzs+9tNXPjkOgYKSeOpn0KCCA04wggNKMIICMqADAgECAhBMuAUxgdcn
+# ikskqpUkXcvrMA0GCSqGSIb3DQEBCwUAMD0xCzAJBgNVBAYTAlVTMREwDwYDVQQK
+# DAhPbGxhbGluazEbMBkGA1UEAwwST2xsYWxpbmsgVHJhbnNsYXRlMB4XDTI2MDky
+# NzIwMzAxMFoXDTMxMDkyNzIwNDAwOFowPTELMAkGA1UEBhMCVVMxETAPBgNVBAoM
+# CE9sbGFsaW5rMRswGQYDVQQDDBJPbGxhbGluayBUcmFuc2xhdGUwggEiMA0GCSqG
+# SIb3DQEBAQUAA4IBDwAwggEKAoIBAQDpNLDP5c0TexrxYdYqJMLPDxCOZM0+QoXg
+# 5svaRzhQJijYqEyJy948ohBzuHDLT+7H/zZhwAqSoPubuukFyYuWAWZl5wrstRVb
+# JzHuHP/kd+mUWGPDB1LDrPfIeO0I4udGPovTnMi+A/o8xW12MlV5UkGnmm5H2fh7
+# NZNrqNIkdniCGcuaC1FzgasB8RycL48OVyh4oRScWYT7Qt3+VHFL9cA6zw7oOcZF
+# 01NitlIvFUcDDF9PcgIrqC8oijBnGvhCrNfnSZ5VIPWGBhVCu2I5xXXXoLLCat2q
+# BM8F9hNLf2mCVRROG7WA1AB0QnJmzWYssUzYwYvLugM/dZdDtdVpAgMBAAGjRjBE
+# MA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzAdBgNVHQ4EFgQU
+# UPrzXEaCLMYgxVV885AEtCcS6lgwDQYJKoZIhvcNAQELBQADggEBALbuaajIkkdu
+# XIiZplM6NdzBWyn8nW8dvWArGHBqj7N27p+/CvDLFh1+a9uM5U9oHINRVp3GF8Rr
+# MJ6u5Z+0Ug1EgK3+I7waF1/UsJrZmp0GUs9xPH9lkpKQ+njf9aoda9iq0FkrAIWx
+# y3onqVWK0BjImL/unkZqvLrx6IrnmJUM7JMGHMR6iGa0kve9ykon79AeJSNp6ON9
+# w4djSed6hSnciOjUu8L0cu8SIP4+xGB30Ici6SYZuxdhM5v/ettWUtcUS4hI4oDO
+# LrrqvPTMyeDVghZfca2EUv0gF/HrC1R2Lu8tHpOx/Tg15aXfRVNl5th9em8Fa4jM
+# 2mO/0iQJcr4xggIDMIIB/wIBATBRMD0xCzAJBgNVBAYTAlVTMREwDwYDVQQKDAhP
+# bGxhbGluazEbMBkGA1UEAwwST2xsYWxpbmsgVHJhbnNsYXRlAhBMuAUxgdcniksk
+# qpUkXcvrMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAIoAKAAKEC
+# gAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwG
+# CisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIKt9Mtg6aeBODNMLIIrubMZqDJG5
+# ePAF+iM6kNIj1JX9MA0GCSqGSIb3DQEBAQUABIIBAGkJatKvvpOLrBSgfmpYsri0
+# xd7miKT2U4qnGlu1kglR7aGuC/jVMC+ERpth34CFtzSrdkO9PzOrwR+v0Z+DX98t
+# f1rimKgPBZqy6LHi5r73hg7CXMK4FKUrDcqDxY/dbadrxCYV/vizUasebvzhHWn1
+# P8FEnRhyK9FgwTg9I73FKwibtJIW5UjGUihNowRdYwd6FEXEIA0QmWs4vR8a3MOv
+# cwvKrhkj47OQl/txzaBrT+i/tVP6ElYgNa+rMncnBLO9rlvXqtooBb1/EXhbdMqu
+# +7/cI94N9wDiNS8pbuMEd2Q6NE1NoSJ9bs/w+6/G8dbimWQQFuN53A1PFDwl71k=
+# SIG # End signature block

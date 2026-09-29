@@ -11,7 +11,7 @@
 use crate::audio::resample::Resampler;
 use parking_lot::Mutex;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 const ASSUMED_IN_RATE: u32 = 48_000;
 
@@ -24,10 +24,10 @@ pub struct JitterPlayer {
     target_ms: u32,
     /// Buffered samples (already resampled to out_rate, mono).
     ring: Mutex<VecDeque<f32>>,
-    /// State flag for playback prebuffering
-    playing: Mutex<bool>,
+    /// State flag for playback prebuffering (Atomic to eliminate lock-order inversion deadlock - Bug 24 Fix)
+    playing: AtomicBool,
     /// Number of consecutive callbacks that encountered an empty ring buffer
-    consecutive_empty: Mutex<usize>,
+    consecutive_empty: AtomicUsize,
     /// Last detected or signaled input sample rate
     last_in_rate: Mutex<u32>,
     /// Total underrun count telemetry
@@ -43,8 +43,8 @@ impl JitterPlayer {
             out_channels: AtomicUsize::new(out_channels.max(1)),
             target_ms,
             ring: Mutex::new(VecDeque::new()),
-            playing: Mutex::new(false),
-            consecutive_empty: Mutex::new(0),
+            playing: AtomicBool::new(false),
+            consecutive_empty: AtomicUsize::new(0),
             last_in_rate: Mutex::new(ASSUMED_IN_RATE),
             underruns: AtomicU64::new(0),
             resamplers: Mutex::new(HashMap::new()),
@@ -52,11 +52,13 @@ impl JitterPlayer {
     }
 
     /// Read current configured output sample rate.
+    #[allow(dead_code)]
     pub fn out_rate(&self) -> u32 {
         self.out_rate.load(Ordering::Relaxed)
     }
 
     /// Read current configured output channel count.
+    #[allow(dead_code)]
     pub fn out_channels(&self) -> usize {
         self.out_channels.load(Ordering::Relaxed)
     }
@@ -91,8 +93,8 @@ impl JitterPlayer {
             let mut ring = self.ring.lock();
             ring.clear();
         }
-        *self.playing.lock() = false;
-        *self.consecutive_empty.lock() = 0;
+        self.playing.store(false, Ordering::Release);
+        self.consecutive_empty.store(0, Ordering::Relaxed);
     }
 
     /// Push an audio frame with backwards compatibility.
@@ -120,7 +122,8 @@ impl JitterPlayer {
             let rate = if explicit_rate > 0 {
                 explicit_rate
             } else {
-                ASSUMED_IN_RATE
+                let current = *self.last_in_rate.lock();
+                if current > 0 { current } else { ASSUMED_IN_RATE }
             };
             *self.last_in_rate.lock() = rate;
             (rate, bytes)
@@ -182,20 +185,18 @@ impl JitterPlayer {
     }
 
     /// Fill an output interleaved buffer from the ring. Underrun -> silence.
+    /// Bug 24 Fix: Lock-free atomics for `playing` and `consecutive_empty` eliminate lock-order inversion deadlock.
     pub fn fill_into<T: cpal::Sample + cpal::FromSample<f32>>(&self, out: &mut [T]) {
         let needed = out.len();
         let mut ring = self.ring.lock();
         let out_rate = self.out_rate.load(Ordering::Relaxed);
         let target_len = (out_rate as usize) * (self.target_ms as usize) / 1000;
 
-        let mut playing = self.playing.lock();
-        let mut consecutive_empty = self.consecutive_empty.lock();
-
         // Gating only occurs before playback starts (pre-buffer)
-        if !*playing {
+        if !self.playing.load(Ordering::Acquire) {
             if ring.len() >= target_len {
-                *playing = true;
-                *consecutive_empty = 0;
+                self.playing.store(true, Ordering::Release);
+                self.consecutive_empty.store(0, Ordering::Relaxed);
             } else {
                 for s in out.iter_mut() { *s = <T as cpal::FromSample<f32>>::from_sample_(0.0); }
                 return;
@@ -206,7 +207,7 @@ impl JitterPlayer {
         let mut i = 0;
         while i < needed {
             if let Some(next) = ring.pop_front() {
-                *consecutive_empty = 0;
+                self.consecutive_empty.store(0, Ordering::Relaxed);
                 // Clamp to prevent DAC clipping/distortion noise (Bug #2 fix)
                 let clamped = next.clamp(-1.0, 1.0);
                 for c in 0..ch {
@@ -218,12 +219,12 @@ impl JitterPlayer {
             } else {
                 // Buffer momentarily emptied mid-callback (Bug #1 & Bug #6 fix)
                 self.underruns.fetch_add(1, Ordering::Relaxed);
-                *consecutive_empty += 1;
+                let count = self.consecutive_empty.fetch_add(1, Ordering::Relaxed) + 1;
 
                 // Only transition back to pre-buffering if the buffer has been empty for
                 // at least 15 consecutive callbacks (~150ms), meaning the utterance truly finished.
-                if *consecutive_empty >= 15 {
-                    *playing = false;
+                if count >= 15 {
+                    self.playing.store(false, Ordering::Release);
                 }
 
                 while i < needed {
@@ -237,7 +238,8 @@ impl JitterPlayer {
 
     /// Flush active resamplers into the ring buffer when an utterance ends.
     pub async fn flush_resamplers(&self) {
-        *self.last_in_rate.lock() = ASSUMED_IN_RATE;
+        // Bug 23 Fix: Do NOT clobber last_in_rate on utterance boundary!
+        // Preserves the active stream rate (e.g. 48kHz streaming PCM) across sentences.
         let mut map = self.resamplers.lock();
         let mut flushed_all = Vec::new();
         for resampler in map.values_mut() {
@@ -269,6 +271,15 @@ impl JitterPlayer {
         if out_rate == 0 { return 0; }
         len * 1000 / out_rate
     }
+
+    /// Check if the jitter player is actively outputting translated audio to speakers.
+    /// Bug 2 & Bug 24 Fix: Lock-free atomic check avoids locking `playing`, preventing deadlock with `fill_into`.
+    pub fn is_playing(&self) -> bool {
+        if !self.playing.load(Ordering::Acquire) {
+            return false;
+        }
+        !self.ring.lock().is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -292,7 +303,7 @@ mod tests {
         assert_eq!(player.out_channels(), 1);
         // Ring should be cleared on swap to prevent old rate pitch distortion
         assert_eq!(player.ring.lock().len(), 0);
-        assert!(!*player.playing.lock());
+        assert!(!player.playing.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
@@ -350,5 +361,85 @@ mod tests {
         // Resampled dynamically from 48kHz to 44.1kHz
         let count = player.ring.lock().len();
         assert!(count > 250 && count <= 441, "Expected resampled samples for 44.1kHz, got {}", count);
+    }
+
+    #[tokio::test]
+    async fn test_jitter_player_is_playing_state() {
+        let player = JitterPlayer::new(48_000, 2, 20); // 20ms prebuffer = 960 samples
+        assert!(!player.is_playing(), "initially not playing");
+
+        // Push 1200 samples of audio (exceeding 20ms prebuffer)
+        let pcm = vec![0u8; 2400];
+        player.push_audio(&pcm).await;
+        assert!(!player.is_playing(), "not playing yet until cpal callback drains");
+
+        // First fill_into triggers playing = true
+        let mut out = [0.0f32; 8];
+        player.fill_into(&mut out);
+        assert!(player.is_playing(), "is_playing must be true during active playback");
+
+        // Drain all remaining samples (player has 2 channels so 6000 floats = 3000 frames)
+        let mut drain = vec![0.0f32; 6000];
+        player.fill_into(&mut drain);
+        assert!(!player.is_playing(), "is_playing must return false once ring buffer is empty");
+    }
+
+    #[tokio::test]
+    async fn test_jitter_player_flush_resamplers_preserves_rate() {
+        // Bug 23 Regression Test: flush_resamplers must NOT clobber last_in_rate to 24000
+        let player = JitterPlayer::new(48_000, 2, 20);
+        // Explicit 48kHz audio push
+        let pcm = vec![0u8; 960];
+        player.push_audio_with_rate(&pcm, 48_000).await;
+        assert_eq!(*player.last_in_rate.lock(), 48_000, "rate should be 48000 after 48k chunk");
+
+        // Utterance boundary: resamplers flushed
+        player.flush_resamplers().await;
+
+        // Verify last_in_rate was preserved and NOT reset to 24000
+        assert_eq!(
+            *player.last_in_rate.lock(),
+            48_000,
+            "flush_resamplers must NOT clobber last_in_rate to 24000 on utterance end"
+        );
+
+        // Subsequent utterance chunk arrives with omitted rate (explicit_rate = 0)
+        player.push_audio_with_rate(&pcm, 0).await;
+        assert_eq!(
+            *player.last_in_rate.lock(),
+            48_000,
+            "omitted rate chunk in subsequent utterance must retain active 48kHz rate, not 24kHz"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_jitter_player_concurrent_fill_and_is_playing_no_deadlock() {
+        use std::sync::Arc;
+
+        let player = Arc::new(JitterPlayer::new(48_000, 2, 20));
+        let pcm = vec![0u8; 960];
+        player.push_audio(&pcm).await;
+
+        let p1 = Arc::clone(&player);
+        let p2 = Arc::clone(&player);
+
+        // Task 1: simulates cpal audio callback running fill_into concurrently
+        let h1 = tokio::spawn(async move {
+            let mut out = [0.0f32; 128];
+            for _ in 0..10_000 {
+                p1.fill_into(&mut out);
+            }
+        });
+
+        // Task 2: simulates tokio task calling is_playing concurrently
+        let h2 = tokio::spawn(async move {
+            for _ in 0..10_000 {
+                let _ = p2.is_playing();
+            }
+        });
+
+        let (r1, r2) = tokio::join!(h1, h2);
+        assert!(r1.is_ok());
+        assert!(r2.is_ok());
     }
 }

@@ -56,6 +56,7 @@
 
 import WebSocket from 'ws';
 import { config, log } from './config.js';
+import { SOUND_STREAM_SOURCES, SOUND_STREAM_TARGETS } from './langs.js';
 
 /**
  * Build the config message that opens the upstream session.
@@ -150,8 +151,10 @@ export function translateEvent(raw) {
         const r = pcm.readUInt32LE(24);
         if (r > 0) detectedWavRate = r;
       }
-      const codec = detectedWavRate ? 'wav' : (parsed.codec ?? 'pcm_s16le');
-      const sampleRate = detectedWavRate ?? parsed.sample_rate ?? (codec === 'wav' ? 24000 : 48000);
+      const isWav = detectedWavRate || (parsed.codec && parsed.codec.toLowerCase() === 'wav');
+      const defaultRate = isWav ? 24000 : 48000; // Streaming PCM lane is 48kHz; batch WAV lane is 24kHz
+      const codec = isWav ? 'wav' : (parsed.codec ?? 'pcm_s16le');
+      const sampleRate = detectedWavRate ?? parsed.sample_rate ?? parsed.sampleRate ?? defaultRate;
 
       return {
         kind: 'audio',
@@ -159,6 +162,8 @@ export function translateEvent(raw) {
           pcm,
           codec,
           sampleRate,
+          explicitCodec: !!(detectedWavRate || parsed.codec),
+          explicitSampleRate: !!(detectedWavRate || parsed.sample_rate || parsed.sampleRate),
           language: parsed.language ?? parsed.lang ?? '',
           chunkSeq: parsed.chunk_seq ?? 0,
           last: parsed.last === true,
@@ -167,7 +172,16 @@ export function translateEvent(raw) {
       };
     }
     case 'warning':            return { kind: 'warning',         payload: parsed };
-    case 'error':              return { kind: 'error',           payload: parsed };
+    case 'error': {
+      const isOverloaded = parsed.code === 'overloaded' || 
+                           parsed.error === 'overloaded' || 
+                           /overloaded|faster than real time/i.test(parsed.message || '');
+      return { 
+        kind: isOverloaded ? 'overloaded' : 'error', 
+        isOverloaded,
+        payload: parsed 
+      };
+    }
     case 'usage':              return { kind: 'usage',           payload: parsed };
     case 'session.closed':     return { kind: 'session-closed',  payload: parsed };
     default:                   return { kind: 'unknown',         payload: parsed };
@@ -195,20 +209,29 @@ export function openOllalinkStream(args, handlers) {
     state.opened = true;
     log.info('ollalink ws open');
     upstream.send(buildConfig({ ...args, silenceMs: args.silenceMs || 1500 }), (err) => {
-      if (err) handlers.onError(err);
-      else state.configured = true;
+      if (err) handlers.onError?.(err);
+      // Bug 31 Fix: Do NOT set state.configured = true or call onReady here!
+      // Must wait for session.ready from Ollalink before marking configured.
     });
   });
 
   upstream.on('message', (data, isBinary) => {
+    if (state.closing) return;
     const evt = translateEvent(isBinary ? data : data.toString('utf8'));
+    if (!evt || state.closing) return;
+    if (evt.kind === 'session.ready' || evt.kind === 'ready' || evt.payload?.type === 'session.ready') {
+      state.configured = true;
+      handlers.onReady?.(evt.payload);
+    }
     handlers.onEvent(evt);
   });
 
   upstream.on('close', (code, reason) => {
     state.opened = false;
-    log.warn(`ollalink ws closed code=${code} reason=${reason.toString()}`);
-    if (!state.closing) handlers.onClose();
+    const reasonStr = reason ? reason.toString() : '';
+    const wasOverloaded = code === 1008 || code === 4029 || /overloaded|faster than real time/i.test(reasonStr);
+    log.warn(`ollalink ws closed code=${code} reason=${reasonStr}`);
+    if (!state.closing) handlers.onClose(code, reasonStr, wasOverloaded);
   });
 
   upstream.on('error', (err) => {
@@ -233,12 +256,13 @@ export function openOllalinkStream(args, handlers) {
     close() {
       state.closing = true;
       try {
+        upstream.removeAllListeners('message');
         upstream.close(1000, 'client hangup');
         setTimeout(() => {
           if (upstream.readyState !== WebSocket.CLOSED) {
             try { upstream.terminate(); } catch { /* ignore */ }
           }
-        }, 100).unref?.();
+        }, 50).unref?.();
       } catch { /* ignore */ }
     },
     isOpen: () => state.opened && upstream.readyState === WebSocket.OPEN,
@@ -259,14 +283,22 @@ export async function probeOllalinkLanguage(args = {}) {
   const targetLang = (args.targetLang || 'en').split(/[-_]/)[0].toLowerCase().trim();
   const sourceLang = (args.sourceLang || 'en').split(/[-_]/)[0].toLowerCase().trim();
 
-  // Instant response for languages known to be under development / unsupported on Ollalink edge
-  if (['ta', 'te', 'pa', 'ml', 'mr', 'gu', 'or', 'as'].includes(targetLang) ||
-      ['ta', 'te', 'pa', 'ml', 'mr', 'gu', 'or', 'as'].includes(sourceLang)) {
+  // Bug 16 Fix: Dynamic and strict validation against canonical SOUND_STREAM_TARGETS & SOUND_STREAM_SOURCES
+  if (!SOUND_STREAM_TARGETS.includes(targetLang)) {
     return {
       ok: false,
       underDevelopment: true,
       language: targetLang,
-      error: `Voice translation for '${targetLang}' is currently under development.`,
+      error: `Voice translation for '${targetLang}' is currently not supported on Sound-Stream (supported: ${Array.from(SOUND_STREAM_TARGETS).join(', ')}).`,
+    };
+  }
+
+  if (sourceLang !== 'auto' && !SOUND_STREAM_SOURCES.includes(sourceLang)) {
+    return {
+      ok: false,
+      underDevelopment: true,
+      language: sourceLang,
+      error: `Voice input for '${sourceLang}' is currently not supported on Sound-Stream (supported: auto, ${Array.from(SOUND_STREAM_SOURCES).join(', ')}).`,
     };
   }
 

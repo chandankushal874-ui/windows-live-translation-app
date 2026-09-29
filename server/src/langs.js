@@ -17,11 +17,19 @@ export const CAPTION_TARGETS_21 = Object.freeze([
 ]);
 export const CAPTION_TARGETS_22 = CAPTION_TARGETS_21; // backward-compat alias
 
-export const SOUND_STREAM_SOURCES = Object.freeze(['en', 'hi', 'es', 'fr', 'kn', 'ta', 'te', 'bn']);  // + 'auto'
-export const SOUND_STREAM_TARGETS = Object.freeze([
-  'en', 'hi', 'es', 'fr', 'de', 'zh', 'ar', 'ja', 'ru', 'pt', 'it', 'kn', 'ta', 'te', 'bn',
+// Bug 14 Fix: Canonical sound-stream sources per docs: en, hi, es, fr or auto, or pinned de, pt, ru, ar, zh
+export const SOUND_STREAM_SOURCES = Object.freeze([
+  'en', 'hi', 'es', 'fr', 'de', 'pt', 'ru', 'ar', 'zh',
 ]);
-export const SOUND_STREAM_PRODUCTION_VOICES = Object.freeze(['en', 'hi', 'kn', 'ta', 'te', 'bn']);
+
+// Bug 15 Fix: Canonical sound-stream spoken targets: the 9 — en, hi, es, fr, zh, de, ar, pt, ru
+export const SOUND_STREAM_TARGETS = Object.freeze([
+  'en', 'hi', 'es', 'fr', 'zh', 'de', 'ar', 'pt', 'ru',
+]);
+
+export const SOUND_STREAM_PRODUCTION_VOICES = Object.freeze([
+  'en', 'hi', 'es', 'fr', 'zh', 'de', 'ar', 'pt', 'ru',
+]);
 
 /**
  * Available voice personas / characters for neural TTS audio synthesis.

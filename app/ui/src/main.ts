@@ -196,12 +196,13 @@ async function main() {
       hostNameInput.value = prefs.displayName;
       joinNameInput.value = prefs.displayName;
     }
-    if (!isNativeTauri) {
+    const CLOUD_RELAY = 'https://windows-live-translation-app-1.onrender.com';
+    if (!isNativeTauri && window.location.origin && window.location.origin.startsWith('http') && !window.location.origin.includes('localhost') && !window.location.origin.includes('127.0.0.1')) {
       relayUrl.value = window.location.origin;
     } else if (prefs.relayUrl && !prefs.relayUrl.includes('localhost') && !prefs.relayUrl.includes('127.0.0.1')) {
       relayUrl.value = prefs.relayUrl;
     } else {
-      relayUrl.value = 'https://windows-live-translation-app-1.onrender.com';
+      relayUrl.value = CLOUD_RELAY;
     }
     if (prefs.sourceLang) {
       sourceLang.value = prefs.sourceLang;
@@ -235,34 +236,66 @@ async function main() {
   const controller = new CallController(invoke, listen);
 
   // ---------- Relay Health Monitor ----------
+  const CLOUD_RELAY_URL = 'https://windows-live-translation-app-1.onrender.com';
+
+  async function checkTargetRelayHealth(targetUrl: string): Promise<boolean> {
+    const base = targetUrl.trim().replace(/^ws(s)?:/, 'http$1:').replace(/\/call\/?$/, '').replace(/\/+$/, '');
+    if (!base) return false;
+    if (isNativeTauri) {
+      try {
+        const ok = await invoke<boolean>('check_relay_health', { relayUrl: base });
+        if (ok) return true;
+      } catch {}
+    }
+    try {
+      const isSameHost = typeof window !== 'undefined' && (base.includes(window.location.host) || base === window.location.origin);
+      const fetchUrl = (!isNativeTauri && isSameHost) ? '/api/health' : `${base}/api/health`;
+      const res = await fetch(fetchUrl, { method: 'GET', signal: AbortSignal.timeout(5000) });
+      return res.ok;
+    } catch {
+      return false;
+    }
+  }
+
   async function probeRelayHealth() {
     if (controller.isActive() || isConnecting) return;
-    const base = relayUrl.value.replace(/^ws(s)?:/, 'http$1:').replace(/\/call\/?$/, '');
-    try {
-      let isOk = false;
-      if (isNativeTauri) {
-        try {
-          isOk = await invoke<boolean>('check_relay_health', { relayUrl: base });
-        } catch {
-          isOk = false;
-        }
-      }
-      if (!isOk) {
-        const fetchUrl = (!isNativeTauri && (base.includes('onrender.com') || base.includes('localhost:1420'))) ? '/api/health' : `${base}/api/health`;
-        const res = await fetch(fetchUrl, { method: 'GET', signal: AbortSignal.timeout(6000) });
-        isOk = res.ok;
-      }
+    const currentRelay = relayUrl.value.trim();
+    let isOk = await checkTargetRelayHealth(currentRelay);
 
-      if (isOk) {
-        landingErrorBanner.style.display = 'none';
-        if (!controller.isActive() && !isConnecting) {
-          setStatus('idle', '🟢 relay online');
-        }
-      } else {
-        showRelayOfflineWarning(base);
+    // Auto-failover: if current relay (e.g. localhost) is unreachable, probe and switch to Cloud Relay automatically
+    if (!isOk && currentRelay !== CLOUD_RELAY_URL) {
+      const cloudOk = await checkTargetRelayHealth(CLOUD_RELAY_URL);
+      if (cloudOk) {
+        console.info(`[Relay] Relay at ${currentRelay} is offline; automatically switching to Cloud Relay: ${CLOUD_RELAY_URL}`);
+        relayUrl.value = CLOUD_RELAY_URL;
+        isOk = true;
+        try {
+          await invoke('save_prefs', {
+            prefs: {
+              version: 1,
+              displayName: displayName.value || '',
+              relayUrl: CLOUD_RELAY_URL,
+              sourceLang: sourceLang.value || 'en',
+              targetLang: targetLang.value || 'hi',
+              voicePersona: voicePersona.value || 'nh-m01',
+              voiceTone: voiceTone.value || 'natural',
+              inputDevice: inputDevice.value || null,
+              outputDevice: outputDevice.value || null,
+              inputVolume: parseFloat(inputGain.value || '1.0'),
+            },
+          });
+        } catch {}
       }
-    } catch {
-      showRelayOfflineWarning(base);
+    }
+
+    if (isOk) {
+      landingErrorBanner.style.display = 'none';
+      if (!controller.isActive() && !isConnecting) {
+        const isCloud = relayUrl.value.includes('onrender.com');
+        setStatus('idle', isCloud ? '🟢 cloud relay online' : '🟢 local relay online');
+      }
+    } else {
+      showRelayOfflineWarning(relayUrl.value.trim());
     }
   }
 
@@ -459,7 +492,6 @@ async function main() {
 
   // ---------- Call Orchestration & Role-Aware Banners ----------
   function switchToCallView(room: string, isHost: boolean) {
-    updateDiagLangPill();
     currentRoom = room;
     isCurrentCallHost = isHost;
     activeRoomDisplay.textContent = room;
@@ -834,9 +866,6 @@ async function main() {
     }
     targetLang.value = lang;
     lastTargetLang = lang;
-    updateDiagLangPill();
-    resetPipelineStageBoxes();
-    applyDiagnosis('idle', 'LANG CHANGED', `Switched to ${midcallSourceLang.value.toUpperCase()} ➔ ${lang.toUpperCase()}. Ready for speech trace.`);
     if (controller.isActive()) {
       try {
         await controller.changeLanguages(undefined, lang);
@@ -941,15 +970,8 @@ async function main() {
     }
   }));
 
-  unlistens.push(await listen<any>('pipeline-checkpoint', (e) => handlePipelineCheckpoint(e.payload)));
   unlistens.push(await listen<any>('audio-stream-stats', (e) => {
-    const { chunks, bytes, jitterMs, intervalMs, isAudioComing } = e.payload || {};
-    if (stageRecvSub && isAudioComing) {
-      stageRecvSub.textContent = `Audio Active (${chunks} chunks / ${Math.round(bytes / 1024)} KB)`;
-    }
-    if (stagePlaySub && !stagePlaySub.textContent?.includes('Buffer Underrun')) {
-      stagePlaySub.textContent = `Jitter: ${jitterMs}ms (${intervalMs}ms spacing)`;
-    }
+    const { jitterMs, intervalMs, isAudioComing } = e.payload || {};
     const statLatency = document.getElementById('stat-latency');
     if (statLatency && isAudioComing) {
       statLatency.textContent = `Pacing: ${intervalMs}ms | Jitter: ${jitterMs}ms`;
@@ -1022,312 +1044,6 @@ async function main() {
     switchToLandingView();
   }));
 
-
-  // ---------- Pipeline Latency & 4s Watchdog Diagnostics Controller ----------
-  const diagWatchdogBadge = document.getElementById('diag-watchdog-badge');
-  const diagLangPill = document.getElementById('diag-lang-pill');
-  const btnDiagTrace = document.getElementById('btn-diag-trace') as HTMLButtonElement | null;
-
-  const stageBoxMic = document.getElementById('stage-box-mic');
-  const stageMicTimer = document.getElementById('stage-mic-timer');
-  const stageMicFill = document.getElementById('stage-mic-fill');
-  const stageMicSub = document.getElementById('stage-mic-sub');
-
-  const stageBoxSend = document.getElementById('stage-box-send');
-  const stageSendTimer = document.getElementById('stage-send-timer');
-  const stageSendFill = document.getElementById('stage-send-fill');
-  const stageSendSub = document.getElementById('stage-send-sub');
-
-  const stageBoxRecv = document.getElementById('stage-box-recv');
-  const stageRecvTimer = document.getElementById('stage-recv-timer');
-  const stageRecvFill = document.getElementById('stage-recv-fill');
-  const stageRecvSub = document.getElementById('stage-recv-sub');
-
-  const stageBoxPlay = document.getElementById('stage-box-play');
-  const stagePlayTimer = document.getElementById('stage-play-timer');
-  const stagePlayFill = document.getElementById('stage-play-fill');
-  const stagePlaySub = document.getElementById('stage-play-sub');
-
-  const diagFlagPill = document.getElementById('diag-flag-pill');
-  const diagSummaryText = document.getElementById('diag-summary-text');
-  const diagRoundtripVal = document.getElementById('diag-roundtrip-val');
-
-  interface PipelineState {
-    activeStage: 'idle' | 'mic' | 'send' | 'recv' | 'play';
-    tMic: number;
-    tSend: number;
-    tRecv: number;
-    tPlay: number;
-    deltaMicToSend: number;
-    deltaSendToRecv: number;
-    deltaRecvToPlay: number;
-    totalTurnaround: number;
-    watchdogInterval: any;
-    watchdogDeadline: number;
-    isCutAudio: boolean;
-    isChoppy: boolean;
-    turnDurations: number[];
-  }
-
-  const pipelineState: PipelineState = {
-    activeStage: 'idle',
-    tMic: 0,
-    tSend: 0,
-    tRecv: 0,
-    tPlay: 0,
-    deltaMicToSend: 0,
-    deltaSendToRecv: 0,
-    deltaRecvToPlay: 0,
-    totalTurnaround: 0,
-    watchdogInterval: null,
-    watchdogDeadline: 0,
-    isCutAudio: false,
-    isChoppy: false,
-    turnDurations: [],
-  };
-
-  function updateDiagLangPill() {
-    if (diagLangPill) {
-      const src = (midcallSourceLang.value || sourceLang.value || 'en').toUpperCase();
-      const tgt = (midcallTargetLang.value || targetLang.value || 'hi').toUpperCase();
-      diagLangPill.textContent = `${src} ➔ ${tgt}`;
-    }
-  }
-
-  function resetPipelineStageBoxes() {
-    [stageBoxMic, stageBoxSend, stageBoxRecv, stageBoxPlay].forEach((box) => {
-      if (box) box.className = 'diag-stage-box';
-    });
-    [stageMicFill, stageSendFill, stageRecvFill, stagePlayFill].forEach((fill) => {
-      if (fill) fill.style.width = '0%';
-    });
-  }
-
-  function startWatchdog(stageLabel: string) {
-    if (pipelineState.watchdogInterval) {
-      clearInterval(pipelineState.watchdogInterval);
-      pipelineState.watchdogInterval = null;
-    }
-    const WATCHDOG_MAX_MS = 4000;
-    pipelineState.watchdogDeadline = performance.now() + WATCHDOG_MAX_MS;
-
-    if (diagWatchdogBadge) {
-      diagWatchdogBadge.className = 'diag-badge-watchdog running';
-      diagWatchdogBadge.textContent = `⏱️ Watchdog: 4.0s (${stageLabel})`;
-    }
-
-    pipelineState.watchdogInterval = setInterval(() => {
-      const now = performance.now();
-      const remainingMs = Math.max(0, pipelineState.watchdogDeadline - now);
-      const remainingSec = (remainingMs / 1000).toFixed(1);
-
-      if (diagWatchdogBadge) {
-        diagWatchdogBadge.textContent = `⏱️ Watchdog: ${remainingSec}s (${stageLabel})`;
-      }
-
-      if (remainingMs <= 0) {
-        clearInterval(pipelineState.watchdogInterval);
-        pipelineState.watchdogInterval = null;
-        triggerWatchdogTimeout();
-      }
-    }, 50);
-  }
-
-  function stopWatchdog(passed: boolean = true) {
-    if (pipelineState.watchdogInterval) {
-      clearInterval(pipelineState.watchdogInterval);
-      pipelineState.watchdogInterval = null;
-    }
-    if (diagWatchdogBadge) {
-      if (passed) {
-        diagWatchdogBadge.className = 'diag-badge-watchdog success';
-        diagWatchdogBadge.textContent = '✅ Watchdog: Passed (<4.0s)';
-      } else {
-        diagWatchdogBadge.className = 'diag-badge-watchdog timeout';
-        diagWatchdogBadge.textContent = '⚠️ Watchdog: Timeout (>4.0s)';
-      }
-    }
-  }
-
-  function triggerWatchdogTimeout() {
-    if (diagWatchdogBadge) {
-      diagWatchdogBadge.className = 'diag-badge-watchdog timeout';
-      diagWatchdogBadge.textContent = '⚠️ Watchdog Exceeded (>4.0s)';
-    }
-
-    // Determine exact root-cause based on stuck stage
-    if (pipelineState.activeStage === 'mic') {
-      if (stageBoxMic) stageBoxMic.classList.add('delayed');
-      if (stageMicSub) stageMicSub.textContent = 'Capture Stalled';
-      applyDiagnosis('our-app', '🟢 our app', 'Mic → API send is delayed (>4s). Local speech capture / VAD buffer delayed.');
-    } else if (pipelineState.activeStage === 'send') {
-      if (stageBoxSend) stageBoxSend.classList.add('delayed');
-      if (stageSendSub) stageSendSub.textContent = 'API Stalled';
-      applyDiagnosis('api-net', '🔴 API/network', 'API send → response is delayed (>4s). Ollalink cloud translation or network bottleneck.');
-    } else if (pipelineState.activeStage === 'recv') {
-      if (stageBoxRecv) stageBoxRecv.classList.add('delayed');
-      if (stageRecvSub) stageRecvSub.textContent = 'Playout Stalled';
-      applyDiagnosis('our-playback', '🟢 our playback/buffering', 'Response arrives smoothly but speaker is choppy / buffer starved (>4s).');
-    }
-  }
-
-  function applyDiagnosis(cls: string, badge: string, detail: string, roundtrip?: number) {
-    if (diagFlagPill) {
-      diagFlagPill.className = `diag-flag-pill ${cls}`;
-      diagFlagPill.textContent = badge;
-    }
-    if (diagSummaryText) {
-      diagSummaryText.textContent = detail;
-    }
-    if (diagRoundtripVal && typeof roundtrip === 'number') {
-      diagRoundtripVal.textContent = `${roundtrip} ms`;
-      diagRoundtripVal.style.color = cls === 'optimal' ? '#34d399' : '#f87171';
-    }
-  }
-
-  function handlePipelineCheckpoint(payload: any) {
-    if (!payload || !payload.stage) return;
-    const { stage, deltaMs, totalMs, bytes, isCutAudio, isChoppy } = payload;
-
-    switch (stage) {
-      case 'mic': {
-        pipelineState.activeStage = 'mic';
-        pipelineState.tMic = payload.timestamp || performance.now();
-        resetPipelineStageBoxes();
-        if (stageBoxMic) stageBoxMic.className = 'diag-stage-box active';
-        if (stageMicTimer) stageMicTimer.textContent = 'Active';
-        if (stageMicFill) stageMicFill.style.width = '35%';
-        if (stageMicSub) stageMicSub.textContent = 'Speech Detected';
-        startWatchdog('Mic→API');
-        applyDiagnosis('idle', 'SPEECH DETECTED', 'Microphone capturing conversational utterance...');
-        break;
-      }
-
-      case 'send': {
-        pipelineState.activeStage = 'send';
-        pipelineState.deltaMicToSend = deltaMs || Math.round(performance.now() - pipelineState.tMic);
-        if (stageBoxMic) {
-          stageBoxMic.className = 'diag-stage-box completed';
-          if (stageMicTimer) stageMicTimer.textContent = `${pipelineState.deltaMicToSend} ms`;
-          if (stageMicFill) stageMicFill.style.width = '100%';
-          if (stageMicSub) stageMicSub.textContent = 'Buffer Committed';
-        }
-        if (stageBoxSend) {
-          stageBoxSend.className = 'diag-stage-box active';
-          if (stageSendTimer) stageSendTimer.textContent = 'Transmitting';
-          if (stageSendFill) stageSendFill.style.width = '45%';
-          if (stageSendSub) stageSendSub.textContent = 'Streaming Upstream';
-        }
-        startWatchdog('API Wait');
-
-        // Check if Mic -> Send was delayed
-        if (pipelineState.deltaMicToSend > 4000) {
-          stopWatchdog(false);
-          applyDiagnosis('our-app', '🟢 our app', `Mic → API send is delayed (${pipelineState.deltaMicToSend}ms). Audio queue backlog.`);
-        }
-        break;
-      }
-
-      case 'recv': {
-        pipelineState.activeStage = 'recv';
-        pipelineState.deltaSendToRecv = deltaMs || 150;
-        pipelineState.isCutAudio = !!isCutAudio;
-
-        if (stageBoxSend) {
-          stageBoxSend.className = 'diag-stage-box completed';
-          if (stageSendTimer) stageSendTimer.textContent = `${pipelineState.deltaSendToRecv} ms`;
-          if (stageSendFill) stageSendFill.style.width = '100%';
-          if (stageSendSub) stageSendSub.textContent = 'Frame Delivered';
-        }
-        if (stageBoxRecv) {
-          stageBoxRecv.className = isCutAudio ? 'diag-stage-box delayed' : 'diag-stage-box active';
-          if (stageRecvTimer) stageRecvTimer.textContent = `${bytes || 0} bytes`;
-          if (stageRecvFill) stageRecvFill.style.width = isCutAudio ? '30%' : '75%';
-          if (stageRecvSub) stageRecvSub.textContent = isCutAudio ? 'Cut Audio Detected' : 'Decoding Audio';
-        }
-        startWatchdog('Playout');
-
-        // Check for cut audio or delayed response
-        if (isCutAudio) {
-          stopWatchdog(false);
-          applyDiagnosis('api-cut', '🔴 API', 'API response itself contains missing/cut audio (<44 bytes or broken header).');
-        } else if (pipelineState.deltaSendToRecv > 4000) {
-          stopWatchdog(false);
-          applyDiagnosis('api-net', '🔴 API/network', `API send → response is delayed (${pipelineState.deltaSendToRecv}ms). Upstream translation lag.`);
-        }
-        break;
-      }
-
-      case 'play': {
-        pipelineState.activeStage = 'play';
-        pipelineState.deltaRecvToPlay = deltaMs || 15;
-        pipelineState.totalTurnaround = totalMs || (pipelineState.deltaMicToSend + pipelineState.deltaSendToRecv + pipelineState.deltaRecvToPlay);
-        pipelineState.isChoppy = !!isChoppy;
-        stopWatchdog(true);
-
-        if (stageBoxRecv) {
-          stageBoxRecv.className = 'diag-stage-box completed';
-          if (stageRecvFill) stageRecvFill.style.width = '100%';
-          if (stageRecvSub) stageRecvSub.textContent = 'PCM Ready';
-        }
-        if (stageBoxPlay) {
-          stageBoxPlay.className = isChoppy ? 'diag-stage-box delayed' : 'diag-stage-box completed';
-          if (stagePlayTimer) stagePlayTimer.textContent = `${pipelineState.deltaRecvToPlay} ms`;
-          if (stagePlayFill) stagePlayFill.style.width = '100%';
-          if (stagePlaySub) stagePlaySub.textContent = isChoppy ? 'Buffer Underrun' : 'Audio Out Smooth';
-        }
-
-        pipelineState.turnDurations.push(pipelineState.totalTurnaround);
-        if (pipelineState.turnDurations.length > 6) pipelineState.turnDurations.shift();
-
-        // Calculate variance / jitter across turns
-        let isHighJitter = false;
-        if (pipelineState.turnDurations.length >= 3) {
-          const maxTurn = Math.max(...pipelineState.turnDurations);
-          const minTurn = Math.min(...pipelineState.turnDurations);
-          if (maxTurn - minTurn > 800) isHighJitter = true;
-        }
-
-        // Full comparison evaluation
-        if (pipelineState.isCutAudio) {
-          applyDiagnosis('api-cut', '🔴 API', 'API response itself contains missing/cut audio.', pipelineState.totalTurnaround);
-        } else if (pipelineState.deltaMicToSend > 4000) {
-          applyDiagnosis('our-app', '🟢 our app', 'Mic → API send is delayed.', pipelineState.totalTurnaround);
-        } else if (pipelineState.deltaSendToRecv > 4000) {
-          applyDiagnosis('api-net', '🔴 API/network', 'API send → response is delayed (>4s).', pipelineState.totalTurnaround);
-        } else if (isChoppy) {
-          applyDiagnosis('our-playback', '🟢 our playback/buffering', 'Response arrives smoothly but speaker is choppy / buffer starved.', pipelineState.totalTurnaround);
-        } else if (isHighJitter) {
-          applyDiagnosis('net-inconsistent', '🟡 network + client buffering', 'Everything is fast but inconsistent across utterances.', pipelineState.totalTurnaround);
-        } else {
-          applyDiagnosis('optimal', '⚡ OPTIMAL', `Pipeline verified: Mic➔Send➔API➔Speaker in ${pipelineState.totalTurnaround}ms.`, pipelineState.totalTurnaround);
-        }
-        break;
-      }
-    }
-  }
-
-  // Interactive Test 4s Trace Simulation Button
-  if (btnDiagTrace) {
-    btnDiagTrace.addEventListener('click', async () => {
-      btnDiagTrace.disabled = true;
-      btnDiagTrace.textContent = 'Tracing...';
-      updateDiagLangPill();
-
-      handlePipelineCheckpoint({ stage: 'mic', timestamp: performance.now() });
-      await new Promise((r) => setTimeout(r, 120));
-
-      handlePipelineCheckpoint({ stage: 'send', deltaMs: 120, timestamp: performance.now() });
-      await new Promise((r) => setTimeout(r, 680));
-
-      handlePipelineCheckpoint({ stage: 'recv', deltaMs: 680, bytes: 3840, isCutAudio: false, timestamp: performance.now() });
-      await new Promise((r) => setTimeout(r, 45));
-
-      handlePipelineCheckpoint({ stage: 'play', deltaMs: 45, totalMs: 845, isChoppy: false, timestamp: performance.now() });
-      btnDiagTrace.disabled = false;
-      btnDiagTrace.textContent = 'Test 4s Trace';
-    });
-  }
 
   function handleRelayEvent(ev: any) {
     switch (ev?.type) {
@@ -1411,9 +1127,26 @@ async function main() {
       case 'pong':
         break;
 
-      case 'voice.settings.updated':
+      case 'voice.settings.updated': {
+        if (ev.voice) {
+          if (voicePersona) voicePersona.value = ev.voice;
+          if (midcallVoicePersona) midcallVoicePersona.value = ev.voice;
+        }
+        if (ev.tone) {
+          if (voiceTone) voiceTone.value = ev.tone;
+          if (midcallVoiceTone) midcallVoiceTone.value = ev.tone;
+        }
+        showVoiceUpdated(ev.fallback ? `Voice: ${ev.voice} (fallback)` : 'Voice Synchronized');
+        break;
+      }
+
       case 'lang.changed': {
-        showVoiceUpdated('Voice & Language Synchronized');
+        showVoiceUpdated('Language Synchronized');
+        break;
+      }
+
+      case 'warning': {
+        console.warn('[relay warning]', ev.code, ev.message);
         break;
       }
 

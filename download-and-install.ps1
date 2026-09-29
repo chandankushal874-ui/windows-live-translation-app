@@ -8,13 +8,13 @@
     localhost relay server, and launches the desktop executable to display the landing page.
 .USAGE
     # If friend's AI agent downloads from URL:
-    powershell -ExecutionPolicy Bypass -File .\download-and-install.ps1 -ZipUrl "https://.../Ollalink-Translate-Windows-x64.zip"
+    powershell -ExecutionPolicy RemoteSigned -File .\download-and-install.ps1 -ZipUrl "https://.../Ollalink-Translate-Windows-x64.zip"
 
     # If ZIP file is already saved locally (or in Downloads folder):
-    powershell -ExecutionPolicy Bypass -File .\download-and-install.ps1
+    powershell -ExecutionPolicy RemoteSigned -File .\download-and-install.ps1
 
     # Specify custom zip location:
-    powershell -ExecutionPolicy Bypass -File .\download-and-install.ps1 -ZipPath "C:\Downloads\Ollalink-Translate-Windows-x64.zip"
+    powershell -ExecutionPolicy RemoteSigned -File .\download-and-install.ps1 -ZipPath "C:\Downloads\Ollalink-Translate-Windows-x64.zip"
 #>
 
 [CmdletBinding()]
@@ -118,6 +118,16 @@ if (Test-Path $InstallDir) {
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Expand-Archive -Path $targetZip -DestinationPath $InstallDir -Force
 Write-Host "[OK] Extracted package to $InstallDir" -ForegroundColor Green
+$targetExe = Join-Path $InstallDir "ollalink-translate.exe"
+if (Test-Path $targetExe) {
+    $sig = Get-AuthenticodeSignature -FilePath $targetExe
+    if ($sig.SignerCertificate) {
+        Write-Host "[OK] Authenticode Signature: $($sig.SignerCertificate.Subject) [Thumbprint: $($sig.SignerCertificate.Thumbprint)]" -ForegroundColor Green
+    } else {
+        Write-Host "[WARN] Executable is unsigned" -ForegroundColor Yellow
+    }
+}
+
 
 # 3. Execute Dependency & App Installation
 $depScript = Join-Path $InstallDir "install-dependencies.ps1"
@@ -162,3 +172,38 @@ Write-Host "  * Local Relay:  http://localhost:8787 (ONLINE)" -ForegroundColor W
 Write-Host "  * Desktop App:  Landing Page Visible" -ForegroundColor White
 Write-Host ""
 exit 0
+
+# SIG # Begin signature block
+# MIIF+wYJKoZIhvcNAQcCoIIF7DCCBegCAQExDzANBglghkgBZQMEAgEFADB5Bgor
+# BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDdnVHrlNNCTzIJ
+# trESNPnMCjlhgCx6MSoJELe/eXNCbaCCA04wggNKMIICMqADAgECAhBMuAUxgdcn
+# ikskqpUkXcvrMA0GCSqGSIb3DQEBCwUAMD0xCzAJBgNVBAYTAlVTMREwDwYDVQQK
+# DAhPbGxhbGluazEbMBkGA1UEAwwST2xsYWxpbmsgVHJhbnNsYXRlMB4XDTI2MDky
+# NzIwMzAxMFoXDTMxMDkyNzIwNDAwOFowPTELMAkGA1UEBhMCVVMxETAPBgNVBAoM
+# CE9sbGFsaW5rMRswGQYDVQQDDBJPbGxhbGluayBUcmFuc2xhdGUwggEiMA0GCSqG
+# SIb3DQEBAQUAA4IBDwAwggEKAoIBAQDpNLDP5c0TexrxYdYqJMLPDxCOZM0+QoXg
+# 5svaRzhQJijYqEyJy948ohBzuHDLT+7H/zZhwAqSoPubuukFyYuWAWZl5wrstRVb
+# JzHuHP/kd+mUWGPDB1LDrPfIeO0I4udGPovTnMi+A/o8xW12MlV5UkGnmm5H2fh7
+# NZNrqNIkdniCGcuaC1FzgasB8RycL48OVyh4oRScWYT7Qt3+VHFL9cA6zw7oOcZF
+# 01NitlIvFUcDDF9PcgIrqC8oijBnGvhCrNfnSZ5VIPWGBhVCu2I5xXXXoLLCat2q
+# BM8F9hNLf2mCVRROG7WA1AB0QnJmzWYssUzYwYvLugM/dZdDtdVpAgMBAAGjRjBE
+# MA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzAdBgNVHQ4EFgQU
+# UPrzXEaCLMYgxVV885AEtCcS6lgwDQYJKoZIhvcNAQELBQADggEBALbuaajIkkdu
+# XIiZplM6NdzBWyn8nW8dvWArGHBqj7N27p+/CvDLFh1+a9uM5U9oHINRVp3GF8Rr
+# MJ6u5Z+0Ug1EgK3+I7waF1/UsJrZmp0GUs9xPH9lkpKQ+njf9aoda9iq0FkrAIWx
+# y3onqVWK0BjImL/unkZqvLrx6IrnmJUM7JMGHMR6iGa0kve9ykon79AeJSNp6ON9
+# w4djSed6hSnciOjUu8L0cu8SIP4+xGB30Ici6SYZuxdhM5v/ettWUtcUS4hI4oDO
+# LrrqvPTMyeDVghZfca2EUv0gF/HrC1R2Lu8tHpOx/Tg15aXfRVNl5th9em8Fa4jM
+# 2mO/0iQJcr4xggIDMIIB/wIBATBRMD0xCzAJBgNVBAYTAlVTMREwDwYDVQQKDAhP
+# bGxhbGluazEbMBkGA1UEAwwST2xsYWxpbmsgVHJhbnNsYXRlAhBMuAUxgdcniksk
+# qpUkXcvrMA0GCWCGSAFlAwQCAQUAoIGEMBgGCisGAQQBgjcCAQwxCjAIoAKAAKEC
+# gAAwGQYJKoZIhvcNAQkDMQwGCisGAQQBgjcCAQQwHAYKKwYBBAGCNwIBCzEOMAwG
+# CisGAQQBgjcCARUwLwYJKoZIhvcNAQkEMSIEIDTFtABhDDXEm/fRNl1S8Nt5Ai4T
+# J2dLqKV/gTV+XllsMA0GCSqGSIb3DQEBAQUABIIBAH/YepKnkNsTMAU06PjrIAv0
+# zZX1Y4auLezCtDuKC0wG+VtOp8MI5g79uA7631fmlZVoBh97SF/PBM/GD9en1aXl
+# MBqHwMUdDSnq5m6FIx07BY83g+ymjL1On7Bd5XrzPXA8wf7h++T+GPkUn+n6kZD7
+# i2GKSJG2ZXKbRTyd871Of5rhj77xp/MVz3NCSb3SRrcgF/l5alDrjJA+7S8BGB/y
+# DsbFshcbQ6STxRURAo+wP6Gr9DczjOlApbYHYa7Mig2wHVIRkAH4PiSoQXC/NdvI
+# c3LgUZor62OVgDXu5HgHZODmIO9zbzKvIJif1buN8p8OrHLDIYmskhdA2qL70E8=
+# SIG # End signature block

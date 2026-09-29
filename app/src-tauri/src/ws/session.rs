@@ -12,7 +12,16 @@ pub async fn mint_session_via_relay(
     voice: Option<&str>,
     tone: Option<&str>,
 ) -> Result<SessionCredentials> {
-    let url = format!("{}/api/session", relay_url.trim_end_matches('/'));
+    let mut base = relay_url.trim().to_string();
+    if !base.starts_with("http://") && !base.starts_with("https://") && !base.starts_with("ws://") && !base.starts_with("wss://") {
+        if base.starts_with("localhost") || base.starts_with("127.0.0.1") {
+            base = format!("http://{}", base);
+        } else {
+            base = format!("https://{}", base);
+        }
+    }
+    let http_base = base.replace("wss://", "https://").replace("ws://", "http://");
+    let url = format!("{}/api/session", http_base.trim_end_matches('/'));
     let client = reqwest::Client::new();
     let mut payload = serde_json::json!({
         "userId": user_id,
@@ -47,9 +56,18 @@ pub async fn mint_session_via_relay(
         session_id: String,
     }
     let r: MintResp = resp.json().await.context("parse mint response")?;
-    let ws_url = r.ws_url
-        .replace("https://", "wss://")
-        .replace("http://", "ws://");
+    let is_server_local = r.ws_url.contains("localhost") || r.ws_url.contains("127.0.0.1");
+    let is_base_local = base.contains("localhost") || base.contains("127.0.0.1");
+    let ws_url = if is_server_local && !is_base_local {
+        let base_ws = base
+            .replace("https://", "wss://")
+            .replace("http://", "ws://");
+        format!("{}/call", base_ws.trim_end_matches('/'))
+    } else {
+        r.ws_url
+            .replace("https://", "wss://")
+            .replace("http://", "ws://")
+    };
     Ok(SessionCredentials {
         token: r.token,
         ws_url,

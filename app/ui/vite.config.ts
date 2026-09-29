@@ -13,12 +13,12 @@ export default defineConfig({
     allowedHosts: true,
     proxy: {
       '/api': {
-        target: 'https://windows-live-translation-app-1.onrender.com',
+        target: process.env.VITE_RELAY_URL || 'https://windows-live-translation-app-1.onrender.com',
         changeOrigin: true,
         secure: false,
       },
       '/call': {
-        target: 'wss://windows-live-translation-app-1.onrender.com',
+        target: (process.env.VITE_RELAY_URL || 'https://windows-live-translation-app-1.onrender.com').replace(/^http(s)?:/i, 'ws$1:'),
         ws: true,
         changeOrigin: true,
       },

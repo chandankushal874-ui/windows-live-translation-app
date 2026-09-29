@@ -293,12 +293,12 @@ test('Room Capacity: Enforces 1:1 (rejects 3rd participant) and supports room fo
 // ---------------------------------------------------------------------------
 // TEST 3: Multi-Codec Batch Lane (Kannada 24 kHz WAV delivery)
 // ---------------------------------------------------------------------------
-test('Multi-Codec Traversal: 24 kHz WAV audio delivery for Kannada (kn)', async () => {
+test('Multi-Codec Traversal: 24 kHz WAV audio delivery for German (de)', async () => {
   const room = await httpPost('/api/rooms', {});
   const code = room.data.code;
 
-  const a = await httpPost('/api/session', { userId: 'alice', sourceLang: 'en', targetLang: 'kn' });
-  const b = await httpPost('/api/session', { userId: 'kannada-listener', sourceLang: 'en', targetLang: 'kn' });
+  const a = await httpPost('/api/session', { userId: 'alice', sourceLang: 'en', targetLang: 'de' });
+  const b = await httpPost('/api/session', { userId: 'kannada-listener', sourceLang: 'en', targetLang: 'de' });
 
   const wsA = new WebSocket(a.data.wsUrl);
   const wsB = new WebSocket(b.data.wsUrl);
@@ -329,7 +329,7 @@ test('Multi-Codec Traversal: 24 kHz WAV audio delivery for Kannada (kn)', async 
     type: 'translation.audio',
     codec: 'wav',
     sample_rate: 24000,
-    language: 'kn',
+    language: 'de',
     chunk_seq: 0,
     last: true,
     audio_b64: fakeWavBytes.toString('base64'),
@@ -338,7 +338,7 @@ test('Multi-Codec Traversal: 24 kHz WAV audio delivery for Kannada (kn)', async 
   const bobAudio = await bobAudioPromise;
   assert.equal(bobAudio.header.codec, 'wav');
   assert.equal(bobAudio.header.sampleRate, 24000);
-  assert.equal(bobAudio.header.lang, 'kn');
+  assert.equal(bobAudio.header.lang, 'de');
   assert.deepEqual(bobAudio.body, fakeWavBytes);
 
   wsA.close();

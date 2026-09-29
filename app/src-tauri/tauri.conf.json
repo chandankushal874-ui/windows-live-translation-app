@@ -12,6 +12,7 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Ollalink Translate",
         "width": 1100,
         "height": 720,
@@ -42,9 +43,7 @@
       "icons/icon.ico"
     ],
     "windows": {
-      "certificateThumbprint": null,
-      "digestAlgorithm": "sha256",
-      "timestampUrl": ""
+      "digestAlgorithm": "sha256"
     }
   }
 }

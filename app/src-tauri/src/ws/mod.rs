@@ -144,7 +144,11 @@ impl RelaySocket {
             }
             // Strict FIFO queue for matching text headers to upcoming binary frames.
             // Bounded to 32 items to guarantee deterministic memory and prevent offset drifts on dropped frames.
+            let mut last_known_rate: u32 = 48_000;
             let mut expected_audio_queue: std::collections::VecDeque<ExpectedChunk> =
+                std::collections::VecDeque::with_capacity(32);
+            // Bug 1 Fix: Queue for orphan binary frames that arrive before their text metadata header.
+            let mut pending_binary_queue: std::collections::VecDeque<Vec<u8>> =
                 std::collections::VecDeque::with_capacity(32);
 
             while let Some(msg) = read_half.next().await {
@@ -152,6 +156,7 @@ impl RelaySocket {
                     Ok(m) => m,
                     Err(e) => {
                         expected_audio_queue.clear();
+                        pending_binary_queue.clear();
                         let _ = inner_r.app.emit("relay-error", e.to_string());
                         break;
                     }
@@ -168,17 +173,33 @@ impl RelaySocket {
 
                         // 2. Pop corresponding metadata from the strict FIFO queue.
                         let meta = expected_audio_queue.pop_front();
-                        let is_last = meta.map(|m| m.is_last).unwrap_or(false);
 
-                        // 3. Guaranteed sample rate: WAV header overrides queue; queued rate takes precedence over raw PCM default; fallback is 48kHz streaming.
-                        let rate = detected_rate
-                            .or_else(|| meta.map(|m| m.sample_rate))
-                            .unwrap_or(48_000);
-
-                        let tx = inner_r.audio_in_tx.lock().await;
-                        let _ = tx.send((b, rate, is_last));
+                        if let Some(r) = detected_rate {
+                            // Self-describing WAV container
+                            last_known_rate = r;
+                            let is_last = meta.map(|m| m.is_last).unwrap_or(false);
+                            let tx = inner_r.audio_in_tx.lock().await;
+                            let _ = tx.send((b, r, is_last));
+                        } else if let Some(m) = meta {
+                            // Raw PCM with preceding metadata header matched
+                            let rate = m.sample_rate;
+                            if rate > 0 {
+                                last_known_rate = rate;
+                            }
+                            let tx = inner_r.audio_in_tx.lock().await;
+                            let _ = tx.send((b, rate, m.is_last));
+                        } else {
+                            // Bug 1 Fix: Both detected_rate and meta are None!
+                            // Binary frame arrived before its text header (TCP reordering or network jitter).
+                            // Buffer the audio and wait for the next header instead of guessing 48000 (which caused 2x/3x speed).
+                            if pending_binary_queue.len() >= 32 {
+                                pending_binary_queue.pop_front();
+                            }
+                            pending_binary_queue.push_back(b);
+                        }
                     }
                     Message::Text(t) => {
+                        let raw_val: serde_json::Value = serde_json::from_str(&t).unwrap_or(serde_json::Value::Null);
                         match serde_json::from_str::<ServerEvent>(&t) {
                             Ok(ev @ ServerEvent::Audio { end_of_utterance, has_binary, sample_rate, last, .. }) => {
                                 let is_marker = end_of_utterance.unwrap_or(false);
@@ -189,44 +210,58 @@ impl RelaySocket {
                                     ServerEvent::Audio { codec: Some(c), .. } => c.eq_ignore_ascii_case("wav"),
                                     _ => false,
                                 };
-                                // Explicit chunk rate: check header, codec fallback (wav = 24kHz, pcm = 48kHz)
+                                // Explicit chunk rate: check header, codec fallback (wav = 24kHz, pcm = last_known_rate default 48kHz)
                                 let chunk_rate = match sample_rate {
                                     Some(sr) if sr > 0 => sr,
-                                    _ => if is_wav { 24_000 } else { 48_000 },
+                                    _ => if is_wav { 24_000 } else { last_known_rate },
                                 };
+                                if chunk_rate > 0 {
+                                    last_known_rate = chunk_rate;
+                                }
 
                                 if carries_binary {
-                                    if expected_audio_queue.len() >= 32 {
-                                        expected_audio_queue.pop_front();
+                                    // If an orphan binary frame arrived earlier while waiting for its header, pair it now!
+                                    if let Some(buffered_b) = pending_binary_queue.pop_front() {
+                                        let tx = inner_r.audio_in_tx.lock().await;
+                                        let _ = tx.send((buffered_b, chunk_rate, is_last));
+                                    } else {
+                                        if expected_audio_queue.len() >= 32 {
+                                            expected_audio_queue.pop_front();
+                                        }
+                                        expected_audio_queue.push_back(ExpectedChunk {
+                                            sample_rate: chunk_rate,
+                                            is_last,
+                                        });
                                     }
-                                    expected_audio_queue.push_back(ExpectedChunk {
-                                        sample_rate: chunk_rate,
-                                        is_last,
-                                    });
                                 } else if is_marker || is_last {
                                     let tx = inner_r.audio_in_tx.lock().await;
                                     let _ = tx.send((Vec::new(), 0, true));
-                                    // End of utterance reached: clear queue to prevent any off-by-one misalignment in next utterance
+                                    // End of utterance reached: clear queues to prevent misalignment in next utterance
                                     expected_audio_queue.clear();
+                                    pending_binary_queue.clear();
                                 }
-                                let _ = inner_r.app.emit("relay-event", ev);
+                                let _ = inner_r.app.emit("relay-event", &raw_val);
                             }
                             Ok(ev @ ServerEvent::Joined { .. }) => {
                                 resolve_joined_waiter(
                                     "joined",
                                     serde_json::to_value(&ev).unwrap_or(serde_json::Value::Null),
                                 );
-                                let _ = inner_r.app.emit("relay-event", ev);
+                                let _ = inner_r.app.emit("relay-event", &raw_val);
                             }
                             Ok(ServerEvent::Error { code, message }) => {
                                 reject_joined_waiter("joined", format!("{code}: {message}"));
-                                let _ = inner_r.app.emit("relay-event", ServerEvent::Error { code, message });
+                                let _ = inner_r.app.emit("relay-event", &raw_val);
                             }
-                            Ok(ev) => {
-                                let _ = inner_r.app.emit("relay-event", ev);
+                            Ok(_ev) => {
+                                let _ = inner_r.app.emit("relay-event", &raw_val);
                             }
                             Err(_) => {
-                                tracing::debug!(text=%t, "unrecognised frame");
+                                if !raw_val.is_null() {
+                                    let _ = inner_r.app.emit("relay-event", &raw_val);
+                                } else {
+                                    tracing::debug!(text=%t, "unrecognised frame");
+                                }
                             }
                         }
                     }

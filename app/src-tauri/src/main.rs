@@ -14,6 +14,84 @@ use state::AppState;
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
+static RELAY_CHILD: std::sync::Mutex<Option<std::process::Child>> = std::sync::Mutex::new(None);
+
+fn try_spawn_local_relay() {
+    if std::net::TcpStream::connect("127.0.0.1:8787").is_ok() {
+        tracing::info!("Local relay already running on port 8787");
+        return;
+    }
+
+    let mut search_dirs = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        search_dirs.push(cwd.clone());
+        if let Some(parent) = cwd.parent() {
+            search_dirs.push(parent.to_path_buf());
+            if let Some(grandparent) = parent.parent() {
+                search_dirs.push(grandparent.to_path_buf());
+            }
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            search_dirs.push(dir.to_path_buf());
+            if let Some(parent) = dir.parent() {
+                search_dirs.push(parent.to_path_buf());
+            }
+        }
+    }
+
+    let rel_candidates = [
+        "server/src/server.js",
+        "dist-package/server/src/server.js",
+    ];
+
+    for base in &search_dirs {
+        for rel in &rel_candidates {
+            let server_js = base.join(rel);
+            if server_js.exists() {
+                if let Some(server_root) = server_js.parent().and_then(|p| p.parent()) {
+                    let mut cmd = std::process::Command::new("node");
+                    let env_file = server_root.join(".env");
+                    if env_file.exists() {
+                        cmd.arg("--env-file=.env");
+                    }
+                    cmd.arg("src/server.js");
+                    cmd.current_dir(server_root);
+
+                    #[cfg(windows)]
+                    {
+                        use std::os::windows::process::CommandExt;
+                        const CREATE_NO_WINDOW: u32 = 0x08000000;
+                        cmd.creation_flags(CREATE_NO_WINDOW);
+                    }
+
+                    match cmd.spawn() {
+                        Ok(child) => {
+                            tracing::info!("Auto-spawned local relay daemon (PID: {}) from {}", child.id(), server_root.display());
+                            if let Ok(mut lock) = RELAY_CHILD.lock() {
+                                *lock = Some(child);
+                            }
+                            return;
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to auto-spawn local relay via node: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn cleanup_local_relay() {
+    if let Ok(mut lock) = RELAY_CHILD.lock() {
+        if let Some(mut child) = lock.take() {
+            let _ = child.kill();
+        }
+    }
+}
+
 fn main() {
     // Install default crypto provider for rustls 0.23 (tokio-tungstenite WSS TLS connections)
     let _ = rustls::crypto::ring::default_provider().install_default();
@@ -50,11 +128,16 @@ fn main() {
         }))
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
-            // Build the shared state on the Tauri-managed tokio runtime.
+            try_spawn_local_relay();
             let handle = app.handle().clone();
             let state = AppState::new(handle);
             app.manage(state);
             Ok(())
+        })
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                cleanup_local_relay();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::mint_session,
@@ -201,7 +284,15 @@ pub mod commands {
     /// Probe relay health bypassing webview CORS.
     #[tauri::command]
     pub async fn check_relay_health(relay_url: String) -> Result<bool, String> {
-        let base = relay_url.replace("wss://", "https://").replace("ws://", "http://");
+        let mut base = relay_url.trim().to_string();
+        if !base.starts_with("http://") && !base.starts_with("https://") && !base.starts_with("ws://") && !base.starts_with("wss://") {
+            if base.starts_with("localhost") || base.starts_with("127.0.0.1") {
+                base = format!("http://{}", base);
+            } else {
+                base = format!("https://{}", base);
+            }
+        }
+        let base = base.replace("wss://", "https://").replace("ws://", "http://");
         let base = base.trim_end_matches("/call").trim_end_matches('/');
         let url = format!("{}/api/health", base);
         let client = match reqwest::Client::builder()

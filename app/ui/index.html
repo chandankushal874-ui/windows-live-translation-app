@@ -44,6 +44,11 @@
               <option value="hi" selected>Hindi (hi)</option>
               <option value="es">Spanish (es)</option>
               <option value="fr">French (fr)</option>
+              <option value="de">German (de)</option>
+              <option value="zh">Chinese (zh)</option>
+              <option value="ar">Arabic (ar)</option>
+              <option value="ru">Russian (ru)</option>
+              <option value="pt">Portuguese (pt)</option>
               <option value="auto">Auto Detect</option>
             </select>
           </div>
@@ -53,18 +58,13 @@
             <select id="target-lang">
               <option value="en" selected>English (en) — HD Voice</option>
               <option value="hi">Hindi (hi) — HD Voice</option>
-              <option value="kn">Kannada (kn) — HD Voice</option>
-              <option value="ta">Tamil (ta) — HD Voice</option>
-              <option value="te">Telugu (te)</option>
               <option value="es">Spanish (es)</option>
               <option value="fr">French (fr)</option>
               <option value="de">German (de)</option>
               <option value="zh">Chinese (zh)</option>
               <option value="ar">Arabic (ar)</option>
-              <option value="ja">Japanese (ja)</option>
-              <option value="ru">Russian (ru)</option>
               <option value="pt">Portuguese (pt)</option>
-              <option value="it">Italian (it)</option>
+              <option value="ru">Russian (ru)</option>
             </select>
           </div>
         </div>
@@ -240,31 +240,31 @@
         <div class="midcall-langs">
           <label>
             <span>Speaking:</span>
-            <select id="midcall-source-lang">
-              <option value="en">English (en)</option>
-              <option value="hi">Hindi (hi)</option>
-              <option value="es">Spanish (es)</option>
-              <option value="fr">French (fr)</option>
-            </select>
-          </label>
-          <label>
-            <span>Hearing:</span>
-            <select id="midcall-target-lang">
-              <option value="en">English (en)</option>
-              <option value="hi">Hindi (hi)</option>
-              <option value="kn">Kannada (kn)</option>
-              <option value="ta">Tamil (ta)</option>
-              <option value="te">Telugu (te)</option>
-              <option value="es">Spanish (es)</option>
-              <option value="fr">French (fr)</option>
-              <option value="de">German (de)</option>
-              <option value="zh">Chinese (zh)</option>
-              <option value="ar">Arabic (ar)</option>
-              <option value="ja">Japanese (ja)</option>
-              <option value="ru">Russian (ru)</option>
-              <option value="pt">Portuguese (pt)</option>
-              <option value="it">Italian (it)</option>
-            </select>
+                        <select id="midcall-source-lang">
+                <option value="en">English (en)</option>
+                <option value="hi">Hindi (hi)</option>
+                <option value="es">Spanish (es)</option>
+                <option value="fr">French (fr)</option>
+                <option value="de">German (de)</option>
+                <option value="zh">Chinese (zh)</option>
+                <option value="ar">Arabic (ar)</option>
+                <option value="ru">Russian (ru)</option>
+                <option value="pt">Portuguese (pt)</option>
+              </select>
+            </label>
+            <label>
+              <span>Hearing:</span>
+              <select id="midcall-target-lang">
+                <option value="en">English (en)</option>
+                <option value="hi">Hindi (hi)</option>
+                <option value="es">Spanish (es)</option>
+                <option value="fr">French (fr)</option>
+                <option value="de">German (de)</option>
+                <option value="zh">Chinese (zh)</option>
+                <option value="ar">Arabic (ar)</option>
+                <option value="pt">Portuguese (pt)</option>
+                <option value="ru">Russian (ru)</option>
+              </select>
           </label>
         </div>
 
@@ -370,70 +370,6 @@
                 <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
                 <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
               </div>
-            </div>
-          </div>
-
-          <!-- Pipeline Latency & 4s Watchdog Diagnostics Panel -->
-          <div class="pipeline-diag-card" id="pipeline-diag-card">
-            <div class="diag-header-row">
-              <div class="diag-title-area">
-                <span class="diag-icon-pulse">⏱️</span>
-                <span class="diag-title-text">Pipeline Latency Watchdog</span>
-                <span class="diag-badge-watchdog" id="diag-watchdog-badge">Watchdog: 4.0s Ready</span>
-              </div>
-              <div class="diag-header-right">
-                <span class="diag-lang-pill" id="diag-lang-pill">HI ➔ EN</span>
-                <button type="button" class="btn-diag-trace" id="btn-diag-trace" title="Run instant 4s diagnostic trace">Test 4s Trace</button>
-              </div>
-            </div>
-
-            <!-- 4-Stage Stepper Flow -->
-            <div class="diag-stages-container">
-              <!-- Stage 1 -->
-              <div class="diag-stage-box" id="stage-box-mic">
-                <div class="stage-tag">Step 1</div>
-                <div class="stage-label">🎤 Mic Captured</div>
-                <div class="stage-timer-val" id="stage-mic-timer">0 ms</div>
-                <div class="stage-meter"><div class="stage-meter-fill" id="stage-mic-fill"></div></div>
-                <div class="stage-sub-status" id="stage-mic-sub">Awaiting Speech</div>
-              </div>
-              <div class="diag-stage-arrow">➔</div>
-
-              <!-- Stage 2 -->
-              <div class="diag-stage-box" id="stage-box-send">
-                <div class="stage-tag">Step 2</div>
-                <div class="stage-label">📤 Sent to API</div>
-                <div class="stage-timer-val" id="stage-send-timer">0 ms</div>
-                <div class="stage-meter"><div class="stage-meter-fill" id="stage-send-fill"></div></div>
-                <div class="stage-sub-status" id="stage-send-sub">Waiting Send</div>
-              </div>
-              <div class="diag-stage-arrow">➔</div>
-
-              <!-- Stage 3 -->
-              <div class="diag-stage-box" id="stage-box-recv">
-                <div class="stage-tag">Step 3</div>
-                <div class="stage-label">⚡ API Response</div>
-                <div class="stage-timer-val" id="stage-recv-timer">0 ms</div>
-                <div class="stage-meter"><div class="stage-meter-fill" id="stage-recv-fill"></div></div>
-                <div class="stage-sub-status" id="stage-recv-sub">Waiting Cloud</div>
-              </div>
-              <div class="diag-stage-arrow">➔</div>
-
-              <!-- Stage 4 -->
-              <div class="diag-stage-box" id="stage-box-play">
-                <div class="stage-tag">Step 4</div>
-                <div class="stage-label">🔊 Speaker Playout</div>
-                <div class="stage-timer-val" id="stage-play-timer">0 ms</div>
-                <div class="stage-meter"><div class="stage-meter-fill" id="stage-play-fill"></div></div>
-                <div class="stage-sub-status" id="stage-play-sub">Buffer Ready</div>
-              </div>
-            </div>
-
-            <!-- Root-Cause Analysis Diagnosis Banner -->
-            <div class="diag-diagnosis-banner" id="diag-diagnosis-banner">
-              <div class="diag-flag-pill" id="diag-flag-pill">IDLE</div>
-              <div class="diag-summary-text" id="diag-summary-text">Speak or change languages to trace 4-second pipeline checkpoints.</div>
-              <div class="diag-roundtrip-val" id="diag-roundtrip-val">-- ms</div>
             </div>
           </div>
 

@@ -189,12 +189,20 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         const chosenVoice = normalizeVoice(voice);
         const chosenTone = normalizeTone(tone);
         const session = mintSession({ userId, sourceLang: src, targetLang: tgt, voice: chosenVoice, tone: chosenTone });
+        let wsEndpoint = `${config.publicBase.replace(/^http(s)?:/i, 'ws$1:')}/call`;
+        const reqHost = req.headers['x-forwarded-host'] || req.headers.host;
+        const reqProto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
+        if (reqHost && (config.publicBase.includes('localhost') || config.publicBase.includes('127.0.0.1')) && !reqHost.includes('localhost') && !reqHost.includes('127.0.0.1')) {
+          const wsProto = reqProto === 'https' ? 'wss' : 'ws';
+          wsEndpoint = `${wsProto}://${reqHost}/call`;
+        }
+
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({
           token: session.token,
           expiresAt: session.expiresAt,
           sessionId: session.sessionId,
-          wsUrl: `${config.publicBase.replace(/^http(s)?:/i, 'ws$1:')}/call`,
+          wsUrl: wsEndpoint,
           captionsOn: captionsOn !== false,       // default true
           productionVoice: hasProductionVoice(tgt), // heads-up for the UI
           voice: chosenVoice,
@@ -409,7 +417,7 @@ wss.on('connection', (ws, req) => {
         // doesn't yet support adding targets mid-session, so we re-open when
         // the peer set changes â€” see broadcastToOthers for lang recompute).
         const initialTargets = computeTargets(room, sessionPayload.sid, sessionPayload.tgt);
-        client.upstream = openOllalinkStream(
+        client.upstream = bindUpstream(client,
           {
             sourceLang: participant.sourceLang,
             targetLangs: initialTargets,
@@ -419,7 +427,7 @@ wss.on('connection', (ws, req) => {
           },
           {
             onEvent: (evt) => forwardOllalinkToRoom(client, evt),
-            onClose: () => broadcastToOthers(client, { type: 'peer-upstream-closed', from: participant.sessionId }),
+            onClose: (code, reasonStr, wasOverloaded) => handleUpstreamClose(client, code, reasonStr, wasOverloaded),
             onError: (err) => sendErr(ws, 'upstream-error', err.message),
           },
         );
@@ -432,30 +440,13 @@ wss.on('connection', (ws, req) => {
         }));
         broadcastToOthers(client, { type: 'peer-joined', peer: publicParticipant(participant) });
 
-        // Re-open each existing peer's upstream to include the new participant's
-        // targetLang in the multi-target set. Without this, alice's upstream
-        // (opened when she was alone) only produces her own fallback target;
-        // bob's targetLang would be missing.
+        // Re-open each existing peer's upstream only if their multi-target set changed (Bug 10 Fix)
         for (const [sid, p] of room.participants) {
           if (sid === sessionPayload.sid) continue;
           const peerClient = clientRegistry.get(p.ws);
-          if (!peerClient || !peerClient.upstream) continue;
+          if (!peerClient) continue;
           const peerTargets = computeTargets(room, sid, peerClient.session.targetLang);
-          try { peerClient.upstream?.close(); } catch { /* ignore */ }
-          peerClient.upstream = openOllalinkStream(
-            {
-              sourceLang: peerClient.session.sourceLang,
-              targetLangs: peerTargets,
-              sessionToken: peerClient.session.sessionId || '',
-              voice: peerClient.session.voice,
-              tone: peerClient.session.tone,
-            },
-            {
-              onEvent: (evt) => forwardOllalinkToRoom(peerClient, evt),
-              onClose: () => broadcastToOthers(peerClient, { type: 'peer-upstream-closed', from: peerClient.session.sessionId }),
-              onError: (err) => sendErr(peerClient.ws, 'upstream-error', err.message),
-            },
-          );
+          reopenUpstreamIfTargetsChanged(peerClient, peerTargets);
         }
         return;
       }
@@ -474,7 +465,8 @@ wss.on('connection', (ws, req) => {
       // Toggle captions on/off for THIS participant. Affects only whether caption
       // events are echoed back to them â€” peers still get their own captions per
       // their own setting.
-      if (msg.type === 'captions.set') {
+      // Bug 25 Fix: Accept both captions.set and captions-toggle
+      if (msg.type === 'captions.set' || msg.type === 'captions-toggle') {
         if (!client.session) return sendErr(ws, 'not-joined', 'not in a call');
         const on = msg.on !== false;
         client.session.captionsOn = on;
@@ -505,7 +497,7 @@ wss.on('connection', (ws, req) => {
         if (msg.voice) client.session.voice = normalizeVoice(msg.voice);
         if (msg.tone) client.session.tone = normalizeTone(msg.tone);
 
-        client.upstream = openOllalinkStream(
+        client.upstream = bindUpstream(client,
           {
             sourceLang: src,
             targetLangs: newTargets,
@@ -516,34 +508,20 @@ wss.on('connection', (ws, req) => {
           },
           {
             onEvent: (evt) => forwardOllalinkToRoom(client, evt),
-            onClose: () => broadcastToOthers(client, { type: 'peer-upstream-closed', from: client.session.sessionId }),
+            onClose: (code, reasonStr, wasOverloaded) => handleUpstreamClose(client, code, reasonStr, wasOverloaded),
             onError: (err) => sendErr(ws, 'upstream-error', err.message),
           },
         );
 
         // If this participant's targetLang changed, OTHER speakers' upstreams
-        // need to include the new target. Re-open each peer's upstream.
+        // need to include the new target. Re-open only if targets changed (Bug 10 Fix).
         if (oldTgt !== tgt) {
           for (const [sid, p] of client.room.participants) {
             if (sid === client.session.sessionId) continue;
             const peerClient = clientRegistry.get(p.ws);
-            if (!peerClient || !peerClient.upstream) continue;
+            if (!peerClient) continue;
             const peerTargets = computeTargets(client.room, sid, peerClient.session.targetLang);
-            try { peerClient.upstream?.close(); } catch { /* ignore */ }
-            peerClient.upstream = openOllalinkStream(
-              {
-                sourceLang: peerClient.session.sourceLang,
-                targetLangs: peerTargets,
-                sessionToken: '',
-                voice: peerClient.session.voice,
-                tone: peerClient.session.tone,
-              },
-              {
-                onEvent: (evt) => forwardOllalinkToRoom(peerClient, evt),
-                onClose: () => broadcastToOthers(peerClient, { type: 'peer-upstream-closed', from: peerClient.session.sessionId }),
-                onError: (err) => sendErr(peerClient.ws, 'upstream-error', err.message),
-              },
-            );
+            reopenUpstreamIfTargetsChanged(peerClient, peerTargets);
           }
         }
 
@@ -564,6 +542,9 @@ wss.on('connection', (ws, req) => {
         if (!client.session || !client.room) return sendErr(ws, 'not-joined', 'not in a call');
         const newVoice = normalizeVoice(msg.voice || client.session.voice);
         const newTone = normalizeTone(msg.tone || client.session.tone);
+        if (newVoice === client.session.voice && newTone === client.session.tone && client.upstream?.isOpen()) {
+          return;
+        }
         client.session.voice = newVoice;
         client.session.tone = newTone;
 
@@ -572,7 +553,7 @@ wss.on('connection', (ws, req) => {
           try { client.upstream.close(); } catch { /* ignore */ }
         }
         const currentTargets = computeTargets(client.room, client.session.sessionId, client.session.targetLang);
-        client.upstream = openOllalinkStream(
+        client.upstream = bindUpstream(client, 
           {
             sourceLang: client.session.sourceLang,
             targetLangs: currentTargets,
@@ -582,11 +563,10 @@ wss.on('connection', (ws, req) => {
           },
           {
             onEvent: (evt) => forwardOllalinkToRoom(client, evt),
-            onClose: () => broadcastToOthers(client, { type: 'peer-upstream-closed', from: client.session.sessionId }),
+            onClose: (code, reasonStr, wasOverloaded) => handleUpstreamClose(client, code, reasonStr, wasOverloaded),
             onError: (err) => sendErr(client.ws, 'upstream-error', err.message),
           }
         );
-
         log.info(`voice settings updated for ${client.session.displayName}: voice=${newVoice} tone=${newTone}`);
         ws.send(JSON.stringify({ type: 'voice.settings.updated', voice: newVoice, tone: newTone }));
         broadcastToOthers(client, {
@@ -601,9 +581,17 @@ wss.on('connection', (ws, req) => {
       return; // unknown JSON frame; ignore
     }
 
-    // Binary PCM from app â†’ forward to Ollalink for this participant.
-    if (!client.upstream?.isOpen()) return;
-    client.upstream.send(data);
+    // Binary PCM from client -> queue for real-time paced transmission to Ollalink (Bug 6 & 10 Fix)
+    if (!client.upstream) return;
+    if (!client.upstreamQueue) {
+      client.upstreamQueue = [];
+      client.upstreamPacingActive = false;
+    }
+    if (client.upstreamQueue.length >= 100) {
+      client.upstreamQueue.shift();
+    }
+    client.upstreamQueue.push(data);
+    schedulePacedUpstreamSend(client);
   });
 
   ws.on('close', () => {
@@ -620,6 +608,10 @@ wss.on('connection', (ws, req) => {
   client.heartbeat = setInterval(() => {
     if (!client.isAlive) {
       clearInterval(client.heartbeat);
+  if (client.reconnectTimer) {
+    clearTimeout(client.reconnectTimer);
+    client.reconnectTimer = null;
+  }
       cleanup(client, 'heartbeat-timeout');
       return;
     }
@@ -647,6 +639,333 @@ function publicParticipant(p) {
  * The speaker hears nothing (they are the source); everyone else wants the
  * speaker's voice in THEIR target language. Deduplicated.
  */
+
+function areTargetsEqual(arr1, arr2) {
+  if (!arr1 || !arr2) return false;
+  const a = Array.isArray(arr1) ? arr1 : Array.from(arr1);
+  const b = Array.isArray(arr2) ? arr2 : Array.from(arr2);
+  if (a.length !== b.length) return false;
+  const sA = Array.from(new Set(a)).sort();
+  const sB = Array.from(new Set(b)).sort();
+  if (sA.length !== sB.length) return false;
+  return sA.every((v, i) => v === sB[i]);
+}
+
+function reopenUpstreamIfTargetsChanged(peerClient, newTargets) {
+  if (!peerClient || !peerClient.session) return false;
+  if (areTargetsEqual(peerClient.currentTargetLangs, newTargets) && (peerClient.upstream?.isOpen() || peerClient.upstream?.isConfigured?.())) {
+    return false; // Target languages have not changed; avoid dropping audio or wasting concurrency
+  }
+
+  log.info(`Updating upstream targets for ${peerClient.session.sessionId}: [${peerClient.currentTargetLangs || ''}] -> [${newTargets}]`);
+  try { peerClient.upstream?.close(); } catch { /* ignore */ }
+  peerClient.upstream = bindUpstream(peerClient,
+    {
+      sourceLang: peerClient.session.sourceLang,
+      targetLangs: newTargets,
+      sessionToken: peerClient.session.sessionId || '',
+      voice: peerClient.session.voice,
+      tone: peerClient.session.tone,
+    },
+    {
+      onEvent: (evt) => forwardOllalinkToRoom(peerClient, evt),
+      onClose: (code, reasonStr, wasOverloaded) => handleUpstreamClose(peerClient, code, reasonStr, wasOverloaded),
+      onError: (err) => sendErr(peerClient.ws, 'upstream-error', err.message),
+    },
+  );
+  return true;
+}
+
+function handleUpstreamOverloaded(client, evt) {
+  log.warn(`[OLLALINK OVERLOADED] Upstream overloaded for session=${client.session?.sessionId || 'anon'}:`, evt.payload);
+  
+  // Bug 8 Fix: Notify client to slow down / pace frames
+  if (client.ws?.readyState === 1) {
+    try {
+      client.ws.send(JSON.stringify({
+        type: 'warning',
+        code: 'overloaded',
+        message: 'Audio sent faster than real time. Please pace frames at real-time rate.',
+      }));
+    } catch {}
+  }
+
+  // Clear backlogged queue so we don't immediately burst into the new stream
+  if (client.upstreamQueue) {
+    client.upstreamQueue = client.upstreamQueue.slice(-2);
+    client.upstreamPacingActive = false;
+  }
+
+  client._lastOverloaded = Date.now();
+  scheduleUpstreamReconnect(client, { reason: 'overloaded', backoff: true });
+}
+
+function scheduleUpstreamReconnect(client, { reason = 'error', backoff = true } = {}) {
+  if (client._cleaned || !client.room || !client.session || client.ws?.readyState !== 1) {
+    return;
+  }
+
+  // Bug 26 & 28 Fix: Cancel any active pacing timer and trim stale queue on all reconnect paths
+  if (client.upstreamPacingTimer) {
+    clearTimeout(client.upstreamPacingTimer);
+    client.upstreamPacingTimer = null;
+  }
+  client.upstreamPacingActive = false;
+  if (client.upstreamQueue) {
+    client.upstreamQueue = client.upstreamQueue.slice(-2);
+  }
+
+  if (client.reconnectTimer) {
+    clearTimeout(client.reconnectTimer);
+    client.reconnectTimer = null;
+  }
+
+  client.reconnectAttempts = (client.reconnectAttempts || 0) + 1;
+  if (client.reconnectAttempts > 5) {
+    log.error(`[RECONNECT GAVE UP] session=${client.session.sessionId} after ${client.reconnectAttempts} attempts`);
+    sendErr(client.ws, 'upstream-reconnect-failed', 'Failed to reconnect Ollalink stream after multiple attempts');
+    broadcastToOthers(client, { type: 'peer-upstream-closed', from: client.session.sessionId });
+    return;
+  }
+
+  const delayMs = backoff
+    ? Math.min(3000, Math.floor(300 * Math.pow(1.5, client.reconnectAttempts - 1)))
+    : 100;
+
+  log.warn(`[RECONNECT SCHEDULED] session=${client.session.sessionId} reason=${reason} attempt=${client.reconnectAttempts} delay=${delayMs}ms`);
+
+  try {
+    client.ws.send(JSON.stringify({
+      type: 'upstream-reconnecting',
+      reason,
+      attempt: client.reconnectAttempts,
+      delayMs,
+    }));
+  } catch {}
+
+  client.reconnectTimer = setTimeout(() => {
+    client.reconnectTimer = null;
+    if (client._cleaned || !client.room || !client.session || client.ws?.readyState !== 1) return;
+
+    try { client.upstream?.close(); } catch {}
+
+    const targets = computeTargets(client.room, client.session.sessionId, client.session.targetLang);
+    client.upstream = bindUpstream(client, {
+      sourceLang: client.session.sourceLang,
+      targetLangs: targets,
+      sessionToken: client.session.sessionId || '',
+      voice: client.session.voice,
+      tone: client.session.tone,
+    }, {
+      onEvent: (evt) => forwardOllalinkToRoom(client, evt),
+      onClose: (code, reasonStr, wasOverloaded) => handleUpstreamClose(client, code, reasonStr, wasOverloaded),
+      onError: (err) => sendErr(client.ws, 'upstream-error', err.message),
+    });
+  }, delayMs);
+}
+
+function handleUpstreamClose(client, code, reasonStr, wasOverloaded) {
+  // Always broadcast peer-upstream-closed to peers so they immediately know upstream closed
+  if (client.room && client.session) {
+    broadcastToOthers(client, { type: 'peer-upstream-closed', from: client.session.sessionId });
+  }
+
+  if (client._cleaned || !client.room || !client.session || client.ws?.readyState !== 1) {
+    return;
+  }
+
+  const isOverloadClose = wasOverloaded || (Date.now() - (client._lastOverloaded || 0) < 2000);
+  if (isOverloadClose) {
+    log.warn(`[UPSTREAM OVERLOAD CLOSE] code=${code} reason=${reasonStr} for session=${client.session.sessionId}`);
+    // Bug 27 Fix: If reconnect was already scheduled on overload event, do not double-increment
+    if (client.reconnectTimer) {
+      log.info(`[UPSTREAM OVERLOAD CLOSE] Reconnect already scheduled for session=${client.session.sessionId}`);
+      return;
+    }
+    scheduleUpstreamReconnect(client, { reason: 'overloaded', backoff: true });
+    return;
+  }
+
+  if (code && code !== 1000) {
+    log.info(`[UPSTREAM ABNORMAL CLOSE] code=${code} for session=${client.session.sessionId}, attempting reconnect`);
+    scheduleUpstreamReconnect(client, { reason: 'abnormal-close', backoff: true });
+    return;
+  }
+}
+
+
+// Issue 2 & Bug 13 Fix: Inspect config_applied.tts.lanes, capabilities, voice fallback, and translation targets on session.ready
+export function inspectSessionReadyConfig(client, payload) {
+  if (!client || !payload) return;
+
+  const configApplied = payload.config_applied || payload.config || {};
+  const tts = configApplied.tts || {};
+  const rawLanes = tts.lanes || payload.lanes;
+
+  if (!client.targetLanes) {
+    client.targetLanes = {};
+  }
+
+  // Bug 29 & 30 Fix: Map array of strings to target languages correctly and normalize keys
+  if (rawLanes && typeof rawLanes === 'object') {
+    if (Array.isArray(rawLanes)) {
+      const targetLangs = client.currentTargetLangs || (client.session?.targetLang ? [client.session.targetLang] : ['default']);
+      rawLanes.forEach((item, idx) => {
+        if (typeof item === 'string') {
+          const isStream = item.toLowerCase() === 'stream' || item.toLowerCase() === 'pcm';
+          const rawLang = targetLangs[idx] || targetLangs[0] || 'default';
+          const lang = rawLang.toLowerCase().split(/[-_]/)[0];
+          client.targetLanes[lang] = {
+            lane: item,
+            codec: isStream ? 'pcm_s16le' : 'wav',
+            sampleRate: isStream ? 48000 : 24000,
+          };
+        } else if (item && typeof item === 'object' && item.language) {
+          const isStream = String(item.lane).toLowerCase() === 'stream';
+          const lang = item.language.toLowerCase().split(/[-_]/)[0];
+          client.targetLanes[lang] = {
+            lane: item.lane,
+            codec: isStream ? 'pcm_s16le' : 'wav',
+            sampleRate: isStream ? 48000 : 24000,
+          };
+        }
+      });
+    } else {
+      for (const [langKey, lane] of Object.entries(rawLanes)) {
+        const isStream = String(lane).toLowerCase() === 'stream' || String(lane).toLowerCase() === 'pcm';
+        const lang = langKey.toLowerCase().split(/[-_]/)[0];
+        client.targetLanes[lang] = {
+          lane,
+          codec: isStream ? 'pcm_s16le' : 'wav',
+          sampleRate: isStream ? 48000 : 24000,
+        };
+      }
+    }
+  }
+
+  // 2. Verify capabilities includes "tts" and "translation" (Bug 13 Fix)
+  const capabilities = payload.capabilities || configApplied.capabilities || [];
+  if (Array.isArray(capabilities) && capabilities.length > 0) {
+    const missingCaps = [];
+    if (!capabilities.includes('tts')) missingCaps.push('tts');
+    if (!capabilities.includes('translation')) missingCaps.push('translation');
+
+    if (missingCaps.length > 0) {
+      log.warn(`[OLLALINK READY] Warning: session=${client.session?.sessionId || 'anon'} missing capabilities: [${missingCaps.join(', ')}]. Granted: [${capabilities.join(', ')}]`);
+      if (client.ws?.readyState === 1) {
+        try {
+          client.ws.send(JSON.stringify({
+            type: 'warning',
+            code: 'capability_missing',
+            message: `Upstream did not enable capabilities: ${missingCaps.join(', ')}`,
+            missingCapabilities: missingCaps,
+            grantedCapabilities: capabilities,
+          }));
+        } catch {}
+      }
+    }
+  }
+
+  // 3. Verify tts_voice matches requested voice and update session metadata on fallback (Bug 13 Fix)
+  const requestedVoice = client.upstreamOpts?.voice || client.session?.voice || 'nh-m01';
+  const appliedVoice = tts.voice || payload.tts_voice || payload.voice;
+  if (appliedVoice && appliedVoice !== requestedVoice) {
+    log.warn(`[OLLALINK READY] Voice fallback detected for session=${client.session?.sessionId || 'anon'}: requested=${requestedVoice}, applied=${appliedVoice}`);
+    if (client.session) {
+      client.session.voice = appliedVoice;
+    }
+    if (client.upstreamOpts) {
+      client.upstreamOpts.voice = appliedVoice;
+    }
+    if (client.ws?.readyState === 1) {
+      try {
+        client.ws.send(JSON.stringify({
+          type: 'voice.settings.updated',
+          voice: appliedVoice,
+          requestedVoice,
+          fallback: true,
+          message: `Requested voice '${requestedVoice}' was rejected or unavailable; fell back to '${appliedVoice}'.`,
+        }));
+      } catch {}
+    }
+    if (client.room && client.session) {
+      broadcastToOthers(client, {
+        type: 'peer-voice-updated',
+        sessionId: client.session.sessionId,
+        voice: appliedVoice,
+      });
+    }
+  }
+
+  // 4. Verify config_applied.translation.targets matches requested targets (Bug 13 Fix)
+  const translationApplied = configApplied.translation || payload.translation || {};
+  const appliedTargets = translationApplied.targets || payload.targets;
+  if (Array.isArray(appliedTargets) && client.currentTargetLangs) {
+    const requestedTargets = client.currentTargetLangs;
+    const missingTargets = requestedTargets.filter(t => !appliedTargets.includes(t));
+    if (missingTargets.length > 0) {
+      log.warn(`[OLLALINK READY] Translation targets mismatch for session=${client.session?.sessionId || 'anon'}: requested=[${requestedTargets.join(', ')}], applied=[${appliedTargets.join(', ')}], missing=[${missingTargets.join(', ')}]`);
+      client.currentTargetLangs = appliedTargets.slice();
+      if (client.ws?.readyState === 1) {
+        try {
+          client.ws.send(JSON.stringify({
+            type: 'warning',
+            code: 'targets_truncated',
+            message: `Upstream did not enable translation targets: ${missingTargets.join(', ')}`,
+            appliedTargets,
+            missingTargets,
+          }));
+        } catch {}
+      }
+    }
+  }
+
+  log.info(`[OLLALINK READY] session=${client.session?.sessionId || 'anon'} pre-cached lanes:`, client.targetLanes);
+}
+
+function bindUpstream(clientOwner, opts, handlers = {}) {
+  clientOwner.upstreamGen = (clientOwner.upstreamGen || 0) + 1;
+  const currentGen = clientOwner.upstreamGen;
+  if (clientOwner.upstreamPacingTimer) {
+    clearTimeout(clientOwner.upstreamPacingTimer);
+    clientOwner.upstreamPacingTimer = null;
+  }
+  clientOwner.upstreamPacingActive = false;
+  clientOwner.currentTargetLangs = Array.isArray(opts.targetLangs)
+    ? opts.targetLangs.slice()
+    : Array.from(opts.targetLangs);
+  clientOwner.upstreamOpts = { ...opts };
+
+  return openOllalinkStream(opts, {
+    ...handlers,
+    onReady: (readyPayload) => {
+      if (clientOwner.upstreamGen !== currentGen) return;
+      clientOwner.reconnectAttempts = 0;
+      if (readyPayload) inspectSessionReadyConfig(clientOwner, readyPayload);
+      schedulePacedUpstreamSend(clientOwner);
+      if (handlers.onReady) handlers.onReady(readyPayload);
+    },
+    onEvent: (evt) => {
+      if (clientOwner.upstreamGen !== currentGen) return;
+      if (evt.kind === 'overloaded' || (evt.kind === 'error' && evt.isOverloaded)) {
+        handleUpstreamOverloaded(clientOwner, evt);
+        return;
+      }
+      if (handlers.onEvent) handlers.onEvent(evt);
+      else forwardOllalinkToRoom(clientOwner, evt);
+    },
+    onClose: (code, reasonStr, wasOverloaded) => {
+      if (clientOwner.upstreamGen !== currentGen) return;
+      if (handlers.onClose) handlers.onClose(code, reasonStr, wasOverloaded);
+      else handleUpstreamClose(clientOwner, code, reasonStr, wasOverloaded);
+    },
+    onError: (err) => {
+      if (clientOwner.upstreamGen !== currentGen) return;
+      if (handlers.onError) handlers.onError(err);
+    },
+  });
+}
+
 function computeTargets(room, selfSessionId, selfTargetLang) {
   const targets = new Set();
   for (const [sid, p] of room.participants) {
@@ -684,6 +1003,47 @@ function broadcastToOthers(client, msg) {
  * Captions similarly carry a `language` (target) for translation events and
  * the source language for transcript events. We honor `captionsOn` per peer.
  */
+
+// Bug 6 & Bug 10 Fix: Real-time paced send queue per upstream Ollalink connection
+// Prevents network jitter bursts from delivering audio faster than real-time to Ollalink (code 1006 / overloaded),
+// and buffers frames without dropping while upstream connects/re-opens.
+export function schedulePacedUpstreamSend(client) {
+  if (client.upstreamPacingActive) return;
+  if (!client.upstreamQueue || client.upstreamQueue.length === 0) return;
+  if (!client.upstream) {
+    client.upstreamQueue = [];
+    return;
+  }
+  // If upstream is still establishing handshake (session.configure -> session.ready),
+  // hold the audio in queue instead of dropping it (Bug 10 Fix: Eliminates 1s audio drop on re-open)
+  if (!client.upstream.isOpen() || !client.upstream.isConfigured?.()) {
+    return;
+  }
+
+  client.upstreamPacingActive = true;
+  const chunk = client.upstreamQueue.shift();
+  try {
+    client.upstream.send(chunk);
+  } catch (err) {
+    log.error('upstream send error:', err);
+    client.upstreamPacingActive = false;
+    return;
+  }
+
+  // Calculate real-time duration of this PCM chunk (16kHz mono s16le = 32 bytes/ms)
+  const durationMs = Math.max(10, Math.min(100, Math.floor(chunk.length / 32)));
+
+  // Bug 28 Fix: Store timer handle to cancel on reconnect
+  if (client.upstreamPacingTimer) {
+    clearTimeout(client.upstreamPacingTimer);
+  }
+  client.upstreamPacingTimer = setTimeout(() => {
+    client.upstreamPacingTimer = null;
+    client.upstreamPacingActive = false;
+    schedulePacedUpstreamSend(client);
+  }, durationMs);
+}
+
 export function forwardOllalinkToRoom(client, evt) {
   if (!client.session || !client.room) return;
 
@@ -707,14 +1067,19 @@ export function forwardOllalinkToRoom(client, evt) {
         const peerBase = peer.targetLang.split(/[-_]/)[0].toLowerCase().trim();
         if (pBase !== peerBase) continue;
       }
+      // Bug 30 Fix: Match targetLanes with or without region tag (e.g. 'hi-IN' matches 'hi')
+      const langBase = (p.language || '').toLowerCase().split(/[-_]/)[0].trim();
+      const cachedLane = client.targetLanes?.[langBase] || client.targetLanes?.[(p.language || '').toLowerCase().trim()];
+      const finalCodec = (p.explicitCodec ? p.codec : (cachedLane?.codec || p.codec)) || 'pcm_s16le';
+      const finalRate = (p.explicitSampleRate ? p.sampleRate : (cachedLane?.sampleRate || p.sampleRate)) || (finalCodec === 'wav' ? 24000 : 48000);
 
       try {
         targetWs.send(JSON.stringify({
           type: 'audio',
           from: client.session.sessionId,
           lang: p.language,
-          codec: p.codec,
-          sampleRate: p.sampleRate,
+          codec: finalCodec,
+          sampleRate: finalRate,
           chunkSeq: p.chunkSeq,
           last: p.last,
           endOfUtterance: marker,
