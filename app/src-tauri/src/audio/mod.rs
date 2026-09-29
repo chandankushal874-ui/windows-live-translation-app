@@ -377,11 +377,22 @@ async fn run_sender_watch(
         let resampled = resampler.process(&raw)?;
         pending.extend_from_slice(&resampled);
 
+        // Cap pending to 1.5s max (24000 samples @ 16kHz). If system stalled, discard stale audio
+        // to prevent latency buildup and sped-up playback of old audio.
+        const MAX_PENDING: usize = 24000;
+        if pending.len() > MAX_PENDING {
+            let excess = pending.len() - MAX_PENDING;
+            pending.drain(..excess);
+            tracing::warn!(dropped = excess, "discarded stale pending audio to prevent latency");
+        }
+
         let peak = raw.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
         let _ = app.emit("vu-meter", peak);
 
-        // Send complete 0.5s chunks at real time. Discard partial remainder (next iteration fills it).
-        while pending.len() >= chunk_samples {
+        // Send exactly ONE 0.5s chunk per iteration, then sleep 0.5s.
+        // This ensures real-time pacing: 1 chunk sent per 0.5s = exactly real-time rate.
+        // Leftover pending audio carries to next iteration — no backlog, no burst.
+        if pending.len() >= chunk_samples {
             let frame: Vec<f32> = pending.drain(..chunk_samples).collect();
             let mut pcm_out = Vec::with_capacity(chunk_samples * 2);
             for &s in &frame {
@@ -390,7 +401,6 @@ async fn run_sender_watch(
             }
             if let Err(e) = relay.send_pcm(&pcm_out).await {
                 tracing::warn!(error = %e, "relay send_pcm failed");
-                break;
             }
             tokio::time::sleep(chunk_duration).await;
         }

@@ -33,7 +33,7 @@ test('buildConfig emits the documented session.configure schema', () => {
   assert.equal(cfg.recognition.language, 'en');
   assert.equal(cfg.recognition.punctuation, true);
   assert.equal(cfg.endpointing.mode, 'auto');
-  assert.equal(cfg.endpointing.silence_ms, 600);
+  assert.equal(cfg.endpointing.silence_ms, 1000);
   assert.deepEqual(cfg.translation, { enabled: true, targets: ['hi'] });
   assert.deepEqual(cfg.tts, { enabled: true, voice: 'nh-m01' });
 });

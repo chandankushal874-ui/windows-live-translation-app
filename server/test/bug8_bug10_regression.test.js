@@ -328,6 +328,8 @@ test('Issue 2: session.ready inspects config_applied.tts.lanes and pre-caches ta
   await new Promise((r) => setTimeout(r, 150));
 
   // Now emit audio chunk with sample_rate and codec omitted from Ollalink
+  // C2 Fix: translateEvent defaults raw PCM (no WAV header, no codec field) to pcm_s16le @ 48kHz.
+  // The cachedLane lookup was removed as fragile — translateEvent's own detection is authoritative.
   aliceMock.ws.send(JSON.stringify({
     type: 'translation.audio',
     language: 'hi',
@@ -338,8 +340,9 @@ test('Issue 2: session.ready inspects config_applied.tts.lanes and pre-caches ta
 
   const audioHeader = bobMessages.find((m) => m.type === 'audio' && m.chunkSeq === 1);
   assert.ok(audioHeader, 'Bob should receive audio header');
-  assert.equal(audioHeader.codec, 'wav', 'Codec should fall back to pre-cached lane codec (wav)');
-  assert.equal(audioHeader.sampleRate, 24000, 'Sample rate should fall back to pre-cached lane sample rate (24000)');
+  // Raw PCM without codec field defaults to pcm_s16le @ 48kHz (streaming lane default)
+  assert.equal(audioHeader.codec, 'pcm_s16le', 'Raw PCM without codec field defaults to pcm_s16le');
+  assert.equal(audioHeader.sampleRate, 48000, 'Raw PCM without sample_rate defaults to 48kHz (streaming lane)');
 
   aliceWs.close();
   bobWs.close();

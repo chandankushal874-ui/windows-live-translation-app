@@ -121,7 +121,7 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
   if (req.method === 'GET' && url.pathname === '/api/langs') {
     res.writeHead(200, { 'content-type': 'application/json' });
     return res.end(JSON.stringify({
-      sources: Array.from(SOUND_STREAM_SOURCES),
+      sources: ['auto', ...Array.from(SOUND_STREAM_SOURCES)],
       targets: Array.from(SOUND_STREAM_TARGETS),
       captions: Array.from(CAPTION_TARGETS_22),
       productionVoices: Array.from(SOUND_STREAM_TARGETS).filter(hasProductionVoice),
@@ -433,6 +433,7 @@ wss.on('connection', (ws, req) => {
             sessionToken: msg.token,
             voice: participant.voice,
             tone: participant.tone,
+            silenceMs: 1000,
           },
           {
             onEvent: (evt) => forwardOllalinkToRoom(client, evt),
@@ -511,7 +512,7 @@ wss.on('connection', (ws, req) => {
             sourceLang: src,
             targetLangs: newTargets,
             sessionToken: msg.token ?? '',
-            silenceMs: 1500,
+            silenceMs: 1000,
             voice: client.session.voice,
             tone: client.session.tone,
           },
@@ -569,6 +570,7 @@ wss.on('connection', (ws, req) => {
             sessionToken: client.session.sessionId,
             voice: newVoice,
             tone: newTone,
+            silenceMs: 1000,
           },
           {
             onEvent: (evt) => forwardOllalinkToRoom(client, evt),
@@ -668,6 +670,7 @@ function reopenUpstreamIfTargetsChanged(peerClient, newTargets) {
       sessionToken: peerClient.session.sessionId || '',
       voice: peerClient.session.voice,
       tone: peerClient.session.tone,
+      silenceMs: 1000,
     },
     {
       onEvent: (evt) => forwardOllalinkToRoom(peerClient, evt),
@@ -758,6 +761,7 @@ function scheduleUpstreamReconnect(client, { reason = 'error', backoff = true } 
       sessionToken: client.session.sessionId || '',
       voice: client.session.voice,
       tone: client.session.tone,
+      silenceMs: 1000,
     }, {
       onEvent: (evt) => forwardOllalinkToRoom(client, evt),
       onClose: (code, reasonStr, wasOverloaded) => handleUpstreamClose(client, code, reasonStr, wasOverloaded),
@@ -1064,6 +1068,9 @@ export function forwardOllalinkToRoom(client, evt) {
 
     for (const peer of peers) {
       const targetWs = peer.ws;
+      // H5 Fix: Skip replaced/closing connections to prevent ghost audio on reconnect
+      const peerClient = targetWs ? clientRegistry.get(targetWs) : null;
+      if (peerClient?._replacedByNewConnection) continue;
       // Do not send if target is missing, not ready, or pointing to client (speaker)
       if (!targetWs || targetWs === client.ws || targetWs.readyState !== 1) continue;
       
@@ -1073,11 +1080,11 @@ export function forwardOllalinkToRoom(client, evt) {
         const peerBase = peer.targetLang.split(/[-_]/)[0].toLowerCase().trim();
         if (pBase !== peerBase) continue;
       }
-      // Bug 30 Fix: Match targetLanes with or without region tag (e.g. 'hi-IN' matches 'hi')
-      const langBase = (p.language || '').toLowerCase().split(/[-_]/)[0].trim();
-      const cachedLane = client.targetLanes?.[langBase] || client.targetLanes?.[(p.language || '').toLowerCase().trim()];
-      const finalCodec = (p.explicitCodec ? p.codec : (cachedLane?.codec || p.codec)) || 'pcm_s16le';
-      const finalRate = (p.explicitSampleRate ? p.sampleRate : (cachedLane?.sampleRate || p.sampleRate)) || (finalCodec === 'wav' ? 24000 : 48000);
+      // C2 Fix: Always trust translateEvent's sample rate detection (WAV header bytes or API field).
+      // The cachedLane lookup was fragile and could return wrong rates if session.ready hadn't arrived yet.
+      // translateEvent already does correct WAV byte inspection + API field fallback + codec-based default.
+      const finalCodec = p.codec || 'pcm_s16le';
+      const finalRate = p.sampleRate || (finalCodec === 'wav' ? 24000 : 48000);
 
       try {
         targetWs.send(JSON.stringify({
@@ -1111,9 +1118,14 @@ export function forwardOllalinkToRoom(client, evt) {
     if (peer.ws?.readyState !== 1) continue;
     if (peer.captionsOn === false) continue;
     // Translations target a specific language; only send the matching one.
+    // L6 Fix: Use base-language match (hi-IN matches hi) like audio routing does.
     if (evt.kind === 'translation' || evt.kind === 'translation-delta') {
       const t = evt.payload?.language ?? evt.payload?.lang;
-      if (t && peer.targetLang !== t) continue;
+      if (t && peer.targetLang) {
+        const tBase = t.split(/[-_]/)[0].toLowerCase().trim();
+        const peerBase = peer.targetLang.split(/[-_]/)[0].toLowerCase().trim();
+        if (tBase !== peerBase) continue;
+      }
     }
     try { peer.ws.send(frame); } catch { /* ignore */ }
   }

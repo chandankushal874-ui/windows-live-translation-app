@@ -63,7 +63,7 @@ import { SOUND_STREAM_SOURCES, SOUND_STREAM_TARGETS } from './langs.js';
  * `targets` may be a single-element array for a 1:1 call, or multi-element
  * for a broadcast. Voice is selected per session, not per target.
  */
-export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 600, wsUrl }) {
+export function buildConfig({ sourceLang, targetLangs, sessionToken, voice = 'nh-m01', tone = 'natural', silenceMs = 1000, wsUrl }) {
   const url = wsUrl || config.ollalinkWsUrl || '';
   const arr = Array.isArray(targetLangs) ? targetLangs : [targetLangs];
 
@@ -208,7 +208,7 @@ export function openOllalinkStream(args, handlers) {
   upstream.on('open', () => {
     state.opened = true;
     log.info('ollalink ws open');
-    upstream.send(buildConfig({ ...args, silenceMs: args.silenceMs || 1500 }), (err) => {
+    upstream.send(buildConfig({ ...args, silenceMs: args.silenceMs || 1000 }), (err) => {
       if (err) handlers.onError?.(err);
       // Bug 31 Fix: Do NOT set state.configured = true or call onReady here!
       // Must wait for session.ready from Ollalink before marking configured.

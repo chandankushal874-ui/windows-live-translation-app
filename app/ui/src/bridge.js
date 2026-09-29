@@ -557,21 +557,22 @@ export async function invoke(cmd, args) {
                             try {
                                 const msg = JSON.parse(e.data);
                                 if (msg.type === 'audio') {
-                                    // Bug 32 Fix: Avoid dedup key collision when utteranceId is undefined or "undefined"
-                                    if (msg.utteranceId && msg.utteranceId !== 'undefined' && msg.chunkSeq !== undefined) {
+                                    // C3 Fix: Robust dedup — only dedup when utteranceId is a non-empty string
+                                    if (typeof msg.utteranceId === 'string' && msg.utteranceId.length > 0 && msg.utteranceId !== 'undefined' && msg.chunkSeq !== undefined) {
                                         const chunkKey = `${msg.from || ''}:${msg.utteranceId}:${msg.chunkSeq}`;
                                         if (browserSeenAudioChunks.has(chunkKey)) {
-                                            // Concern E Fix: Purge matching orphan binary frame if duplicate header arrives
                                             if (msg.hasBinary && pendingBinaryQueue.length > 0) {
                                                 pendingBinaryQueue.shift();
                                             }
-                                            return; // Suppress duplicate audio chunk
+                                            return;
                                         }
                                         browserSeenAudioChunks.add(chunkKey);
                                         if (browserSeenAudioChunks.size > 500) {
-                                            const first = browserSeenAudioChunks.values().next().value;
-                                            if (first)
-                                                browserSeenAudioChunks.delete(first);
+                                            const it = browserSeenAudioChunks.values();
+                                            for (let i = 0; i < 50; i++) {
+                                                const v = it.next().value;
+                                                if (v) browserSeenAudioChunks.delete(v);
+                                            }
                                         }
                                     }
                                     const isWavCodec = msg.codec === 'wav';
@@ -594,7 +595,6 @@ export async function invoke(cmd, args) {
                                     }
                                     else if (msg.endOfUtterance || msg.last) {
                                         pendingAudioMetaQueue = [];
-                                        pendingBinaryQueue = [];
                                     }
                                 }
                                 if (msg.type === 'joined' && !joinedResolved) {
