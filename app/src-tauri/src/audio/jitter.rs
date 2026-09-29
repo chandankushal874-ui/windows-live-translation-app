@@ -28,6 +28,7 @@ pub struct JitterPlayer {
     playing: AtomicBool,
     /// Number of consecutive callbacks that encountered an empty ring buffer
     consecutive_empty: AtomicUsize,
+    waiting_callbacks: AtomicUsize,
     /// Last detected or signaled input sample rate
     last_in_rate: Mutex<u32>,
     /// Total underrun count telemetry
@@ -45,6 +46,7 @@ impl JitterPlayer {
             ring: Mutex::new(VecDeque::new()),
             playing: AtomicBool::new(false),
             consecutive_empty: AtomicUsize::new(0),
+            waiting_callbacks: AtomicUsize::new(0),
             last_in_rate: Mutex::new(ASSUMED_IN_RATE),
             underruns: AtomicU64::new(0),
             resamplers: Mutex::new(HashMap::new()),
@@ -95,6 +97,7 @@ impl JitterPlayer {
         }
         self.playing.store(false, Ordering::Release);
         self.consecutive_empty.store(0, Ordering::Relaxed);
+        self.waiting_callbacks.store(0, Ordering::Relaxed);
     }
 
     /// Push an audio frame with backwards compatibility.
@@ -193,10 +196,21 @@ impl JitterPlayer {
         let target_len = (out_rate as usize) * (self.target_ms as usize) / 1000;
 
         // Gating only occurs before playback starts (pre-buffer)
+        // Bug S4 Fix: Target pre-buffer threshold with starvation prevention for short utterances (< target_len)
         if !self.playing.load(Ordering::Acquire) {
-            if ring.len() >= target_len {
+            let ring_len = ring.len();
+            let waited: usize = if ring_len > 0 {
+                self.waiting_callbacks.fetch_add(1, Ordering::Relaxed) + 1
+            } else {
+                self.waiting_callbacks.store(0, Ordering::Relaxed);
+                0
+            };
+
+            // Start playing if target length reached OR if audio has waited >= 3usize callbacks (~30-50ms)
+            if ring_len >= target_len || (ring_len > 0 && waited >= 3) {
                 self.playing.store(true, Ordering::Release);
                 self.consecutive_empty.store(0, Ordering::Relaxed);
+                self.waiting_callbacks.store(0, Ordering::Relaxed);
             } else {
                 for s in out.iter_mut() { *s = <T as cpal::FromSample<f32>>::from_sample_(0.0); }
                 return;
@@ -254,6 +268,17 @@ impl JitterPlayer {
             for s in flushed_all {
                 if ring.len() >= cap { ring.pop_front(); }
                 ring.push_back(s);
+            }
+        }
+
+        // Bug S4 Fix: Utterance ended (is_last = true). If there are any samples in the ring,
+        // force playback immediately so short words or trailing phonemes are never trapped in silence!
+        if !self.playing.load(Ordering::Acquire) {
+            let ring = self.ring.lock();
+            if !ring.is_empty() {
+                self.playing.store(true, Ordering::Release);
+                self.consecutive_empty.store(0, Ordering::Relaxed);
+                self.waiting_callbacks.store(0, Ordering::Relaxed);
             }
         }
     }
@@ -441,5 +466,41 @@ mod tests {
         let (r1, r2) = tokio::join!(h1, h2);
         assert!(r1.is_ok());
         assert!(r2.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_jitter_player_starvation_prevention_for_short_utterance() {
+        // Target ms is 100ms (4800 samples)
+        let player = JitterPlayer::new(48_000, 1, 100);
+        // Push only 480 samples (10ms of audio, far below 100ms target)
+        let pcm = vec![0u8; 960];
+        player.push_audio_with_rate(&pcm, 48_000).await;
+        assert_eq!(player.ring.lock().len(), 480);
+        assert!(!player.is_playing());
+
+        let mut out = [0.0f32; 48];
+        // Callbacks 1 & 2: still waiting
+        player.fill_into(&mut out);
+        assert!(!player.is_playing());
+        player.fill_into(&mut out);
+        assert!(!player.is_playing());
+
+        // Callback 3: waited >= 3 triggers starvation prevention, playing starts
+        player.fill_into(&mut out);
+        assert!(player.is_playing(), "Starvation prevention must trigger playing for short utterance");
+    }
+
+    #[tokio::test]
+    async fn test_jitter_player_flush_resamplers_triggers_playback_for_short_utterance() {
+        // Target ms is 100ms (4800 samples)
+        let player = JitterPlayer::new(48_000, 1, 100);
+        // Push only 480 samples
+        let pcm = vec![0u8; 960];
+        player.push_audio_with_rate(&pcm, 48_000).await;
+        assert!(!player.is_playing());
+
+        // Utterance ends (is_last = true)
+        player.flush_resamplers().await;
+        assert!(player.is_playing(), "flush_resamplers on utterance end must trigger playing if ring has samples");
     }
 }

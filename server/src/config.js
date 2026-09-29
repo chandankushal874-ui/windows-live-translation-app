@@ -28,8 +28,12 @@ if (!process.env.OLLALINK_WS_URL) {
 if (!process.env.PUBLIC_BASE || (process.env.RENDER_EXTERNAL_HOSTNAME && (process.env.PUBLIC_BASE.includes('localhost') || process.env.PUBLIC_BASE.includes('127.0.0.1')))) {
   if (process.env.RENDER_EXTERNAL_HOSTNAME) {
     process.env.PUBLIC_BASE = `https://${process.env.RENDER_EXTERNAL_HOSTNAME}`;
+  } else if (process.env.RENDER_EXTERNAL_URL) {
+    process.env.PUBLIC_BASE = process.env.RENDER_EXTERNAL_URL;
   } else if (process.env.RAILWAY_PUBLIC_DOMAIN) {
     process.env.PUBLIC_BASE = `https://${process.env.RAILWAY_PUBLIC_DOMAIN}`;
+  } else if (process.env.NODE_ENV === 'production') {
+    process.env.PUBLIC_BASE = 'https://windows-live-translation-app-1.onrender.com';
   } else {
     process.env.PUBLIC_BASE = `http://localhost:${process.env.PORT}`;
   }

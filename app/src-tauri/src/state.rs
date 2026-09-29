@@ -266,7 +266,7 @@ impl AppState {
             output_device: args.output_device.clone(),
             sample_rate: 16_000,
             frame_ms: 20,
-            jitter_buffer_ms: 200, // 200ms jitter buffer absorbs network packet arrival gaps cleanly
+            jitter_buffer_ms: 60,  // 60ms jitter buffer absorbs network packet gaps while keeping conversational voice instant
         };
         let audio = AudioPipeline::start(audio_cfg, relay.clone(), self.app_handle.clone())
             .context("start audio pipeline")?;

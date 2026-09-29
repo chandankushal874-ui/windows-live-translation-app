@@ -346,3 +346,38 @@ test('upstream close broadcasts peer-upstream-closed', async () => {
 //   forwardOllalinkToRoom checks peer.captionsOn !== false before sending.
 // That single line is exercised by the caption echo tests above (which use default
 // captionsOn=true and pass), and by the manual "captions.set" toggle test.
+
+
+test('Bug S3: /api/session respects x-forwarded-host and returns wss endpoint', async () => {
+  const r = await fetch(`${BASE}/api/session`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      'x-forwarded-host': 'windows-live-translation-app-1.onrender.com',
+      'x-forwarded-proto': 'https',
+    },
+    body: JSON.stringify({ userId: 'cloud-user', sourceLang: 'en', targetLang: 'hi' }),
+  });
+  const data = await r.json();
+  assert.equal(data.wsUrl, 'wss://windows-live-translation-app-1.onrender.com/call');
+});
+
+test('Bug S5: speaker alone in room never receives audio self-echo from upstream', async () => {
+  const alice = await joinCall('alice-alone', 'en', 'hi');
+  const aliceFake = await currentFakeFor('en');
+
+  let aliceGotAudio = false;
+  alice.ws.on('message', (_, isBinary) => { if (isBinary) aliceGotAudio = true; });
+
+  aliceFake.ws.send(JSON.stringify({
+    type: 'translation.audio',
+    codec: 'pcm_s16le',
+    sample_rate: 48000,
+    language: 'hi',
+    chunk_seq: 0,
+    last: false,
+    audio_b64: Buffer.from([0x01, 0x02, 0x03, 0x04]).toString('base64'),
+  }));
+  await new Promise(r => setTimeout(r, 200));
+  assert.equal(aliceGotAudio, false, 'Speaker alone in room must NEVER receive audio self-echo');
+});

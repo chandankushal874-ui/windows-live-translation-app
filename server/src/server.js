@@ -189,12 +189,15 @@ p { color: #94a3b8; font-size: 0.95rem; line-height: 1.5; margin: 0 0 1.5rem 0; 
         const chosenVoice = normalizeVoice(voice);
         const chosenTone = normalizeTone(tone);
         const session = mintSession({ userId, sourceLang: src, targetLang: tgt, voice: chosenVoice, tone: chosenTone });
-        let wsEndpoint = `${config.publicBase.replace(/^http(s)?:/i, 'ws$1:')}/call`;
-        const reqHost = req.headers['x-forwarded-host'] || req.headers.host;
-        const reqProto = req.headers['x-forwarded-proto'] || (req.socket.encrypted ? 'https' : 'http');
-        if (reqHost && (config.publicBase.includes('localhost') || config.publicBase.includes('127.0.0.1')) && !reqHost.includes('localhost') && !reqHost.includes('127.0.0.1')) {
-          const wsProto = reqProto === 'https' ? 'wss' : 'ws';
+        const reqHost = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+        const reqProtoHeader = (req.headers['x-forwarded-proto'] || '').split(',')[0].trim();
+        const reqProto = reqProtoHeader || (req.socket.encrypted ? 'https' : 'http');
+        let wsEndpoint;
+        if (reqHost && !reqHost.includes('localhost') && !reqHost.includes('127.0.0.1')) {
+          const wsProto = (reqProto.includes('http') && !reqProto.includes('https')) ? 'ws' : 'wss';
           wsEndpoint = `${wsProto}://${reqHost}/call`;
+        } else {
+          wsEndpoint = `${config.publicBase.replace(/^http(s)?:/i, 'ws$1:')}/call`;
         }
 
         res.writeHead(200, { 'content-type': 'application/json' });
@@ -1061,11 +1064,15 @@ export function forwardOllalinkToRoom(client, evt) {
     const marker = p.last === true && !p.pcm;
 
     const peers = Array.from(others(client.room.code, client.session.sessionId));
-    const recipients = peers.length > 0 ? peers : [client.session];
+    // Self-monitor audio return is disabled when alone (prevents acoustic feedback loop and self-echo)
+    if (peers.length === 0) {
+      return;
+    }
 
-    for (const peer of recipients) {
-      const targetWs = peer.ws ?? client.ws;
-      if (targetWs?.readyState !== 1) continue;
+    for (const peer of peers) {
+      const targetWs = peer.ws;
+      // Do not send if target is missing, not ready, or pointing to client (speaker)
+      if (!targetWs || targetWs === client.ws || targetWs.readyState !== 1) continue;
       
       // Check target language match (supports ISO prefixes like 'hi-IN' matching 'hi'):
       if (p.language && peer.targetLang) {
