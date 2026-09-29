@@ -381,6 +381,9 @@ fn spawn_session_refresh(
                     tracing::info!(new_session_id = %new_creds.session_id, "session refreshed");
                     current_expiry = new_creds.expires_at;
 
+                    // Update token on the socket so future reconnect uses refreshed token (Bug A fix)
+                    relay.update_token(new_creds.token.clone());
+
                     if let Err(e) = relay
                         .send_json(serde_json::json!({
                             "type": "session.refresh",

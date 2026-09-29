@@ -53,6 +53,7 @@ pub struct RelaySocket {
 
 struct RelayInner {
     cfg: RelaySocketConfig,
+    current_token: parking_lot::RwLock<String>,
     app: AppHandle,
     /// Outbound queue. Replaced on reconnect; send_pcm clones the current sender.
     out_tx: Mutex<mpsc::UnboundedSender<Message>>,
@@ -71,8 +72,10 @@ impl RelaySocket {
         // Provisional out_tx; replaced after first open_socket call.
         let (out_tx, _drop_rx) = mpsc::unbounded_channel::<Message>();
 
+        let current_token = parking_lot::RwLock::new(cfg.token.clone());
         let inner = Arc::new(RelayInner {
             cfg,
+            current_token,
             app,
             out_tx: Mutex::new(out_tx),
             audio_in_tx: Mutex::new(audio_tx),
@@ -109,9 +112,10 @@ impl RelaySocket {
         *inner.out_tx.lock().await = new_out_tx.clone();
 
         // Initial join frame Ã¢â‚¬â€ written directly, not via queue.
+        let token = inner.current_token.read().clone();
         let join = serde_json::json!({
             "type": "join",
-            "token": inner.cfg.token,
+            "token": token,
             "room": inner.cfg.room_code,
             "displayName": inner.cfg.display_name,
             "captionsOn": inner.cfg.captions_on,
@@ -334,6 +338,12 @@ impl RelaySocket {
                 }
             }
         });
+    }
+
+    /// Update the authentication token on this socket (e.g. after proactive session refresh).
+    /// Used by reconnect attempts so they never send an expired token.
+    pub fn update_token(&self, new_token: String) {
+        *self.inner.current_token.write() = new_token;
     }
 
     pub async fn send_pcm(&self, bytes: &[u8]) -> Result<()> {

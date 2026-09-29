@@ -21,7 +21,7 @@ const UNIT = ['auth.test.js', 'rooms.test.js', 'audio_chunks.test.js',
               'captions_routing.test.js', 'realtime_protocol.test.js',
               'regressions.test.js', 'voice_tones.test.js', 'sample_rate_and_orphan_regression.test.js'];
 const INTEGRATION = ['server.test.js', 'receive_path.test.js',
-                     'rooms_deep.test.js', 'multi_target.test.js', 'deep_e2e_pipeline.test.js', 'deep_e2e_advanced.test.js', 'landing_flow_e2e.test.js', 'host_joining_deep.test.js', 'bug8_bug10_regression.test.js'];
+                     'rooms_deep.test.js', 'multi_target.test.js', 'deep_e2e_pipeline.test.js', 'deep_e2e_advanced.test.js', 'landing_flow_e2e.test.js', 'host_joining_deep.test.js', 'bug8_bug10_regression.test.js', 'reconnect_same_token_resilience.test.js'];
 
 let totalPass = 0;
 let totalFail = 0;

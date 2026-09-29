@@ -382,11 +382,17 @@ wss.on('connection', (ws, req) => {
         // Dedupe: if this userId is already seated (e.g. an earlier WS that didn't
         // cleanly close), remove the stale entry before joining again.
         for (const [sid, p] of room.participants) {
-          if (p.userId === sessionPayload.sub && sid !== sessionPayload.sid) {
-            log.warn(`removing stale participant for userId=${p.userId} (old sid ${sid})`);
+          if (p.userId === sessionPayload.sub) {
+            log.warn(`reconnect/dedupe: replacing earlier participant for userId=${p.userId} (sid ${sid}, isSameSid=${sid === sessionPayload.sid})`);
+            const oldClient = clientRegistry.get(p.ws);
+            if (oldClient) {
+              oldClient._replacedByNewConnection = true;
+            }
             try { p.ws?.terminate(); } catch { /* ignore */ }
-            room.participants.delete(sid);
-            broadcastToOthers(client, { type: 'peer-left', sessionId: sid });
+            if (sid !== sessionPayload.sid) {
+              room.participants.delete(sid);
+              broadcastToOthers(client, { type: 'peer-left', sessionId: sid });
+            }
           }
         }
 
@@ -608,16 +614,16 @@ wss.on('connection', (ws, req) => {
   client.heartbeat = setInterval(() => {
     if (!client.isAlive) {
       clearInterval(client.heartbeat);
-  if (client.reconnectTimer) {
-    clearTimeout(client.reconnectTimer);
-    client.reconnectTimer = null;
-  }
+      if (client.reconnectTimer) {
+        clearTimeout(client.reconnectTimer);
+        client.reconnectTimer = null;
+      }
       cleanup(client, 'heartbeat-timeout');
       return;
     }
     client.isAlive = false;
     try { ws.ping(); } catch { /* ignore */ }
-  }, 5_000);
+  }, 20_000);
   client.heartbeat.unref?.();  // Don't keep the process alive just for pings
 });
 
@@ -1129,8 +1135,19 @@ function cleanup(client, reason) {
   try { client.upstream?.close(); } catch { /* ignore */ }
 
   if (client.room && client.session) {
-    broadcastToOthers(client, { type: 'peer-left', sessionId: client.session.sessionId });
-    leaveRoom(client.room.code, client.session.sessionId);
+    // Bug C fix: If this client connection was replaced by a newer connection for the same session/user,
+    // do NOT broadcast peer-left and do NOT evict the new participant from the room!
+    if (!client._replacedByNewConnection) {
+      const active = client.room.participants.get(client.session.sessionId);
+      if (!active || active.ws === client.ws) {
+        broadcastToOthers(client, { type: 'peer-left', sessionId: client.session.sessionId });
+        leaveRoom(client.room.code, client.session.sessionId, client.ws);
+      } else {
+        log.info(`cleanup: skipping peer-left & leaveRoom for ${client.session.sessionId} (newer connection is active)`);
+      }
+    } else {
+      log.info(`cleanup: skipping peer-left & leaveRoom for ${client.session.sessionId} (marked replaced by newer connection)`);
+    }
   }
   try { client.ws.terminate(); } catch { /* ignore */ }
 }

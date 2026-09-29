@@ -97,16 +97,23 @@ function touch(room) {
 export function joinRoom(code, participant) {
   const room = getRoom(code);
   if (!room) return null;
-  if (room.participants.size >= room.maxParticipants) return null;
+  if (room.participants.size >= room.maxParticipants && !room.participants.has(participant.sessionId)) return null;
   room.participants.set(participant.sessionId, participant);
   touch(room);
   log.info(`room ${room.code}: ${participant.displayName} joined (${room.participants.size}/${room.maxParticipants})`);
   return participant;
 }
 
-export function leaveRoom(code, sessionId) {
+export function leaveRoom(code, sessionId, clientWs = null) {
   const room = getRoom(code);
   if (!room) return false;
+  if (clientWs) {
+    const existing = room.participants.get(sessionId);
+    if (existing && existing.ws && existing.ws !== clientWs) {
+      log.info(`leaveRoom ignored for ${sessionId}: newer socket connection is active`);
+      return false;
+    }
+  }
   const removed = room.participants.delete(sessionId);
   if (removed) {
     touch(room);
