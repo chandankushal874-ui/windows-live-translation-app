@@ -73,6 +73,10 @@ let packetArrivalIntervals = [];
 let outboundAudioQueue = [];
 let outboundPacingActive = false;
 function sendPacedOutbound(ws, buf) {
+    // L2 Fix: Cap outbound audio queue at 250 chunks to prevent memory leaks on stalled network
+    if (outboundAudioQueue.length >= 250) {
+        outboundAudioQueue.shift();
+    }
     outboundAudioQueue.push(buf);
     if (outboundPacingActive)
         return;
@@ -94,7 +98,8 @@ function drainOutboundAudioQueue(ws) {
     }
     catch { }
     // 16kHz mono s16le = 32 bytes per millisecond
-    const durationMs = Math.max(10, Math.min(100, Math.floor(chunk.byteLength / 32)));
+    // H1 Fix: Do not clamp to 100ms! Allow true chunk duration (e.g. 128ms, 200ms) with a safe cap of 1000ms
+    const durationMs = Math.max(10, Math.min(1000, Math.floor(chunk.byteLength / 32)));
     setTimeout(() => {
         outboundPacingActive = false;
         drainOutboundAudioQueue(ws);
@@ -213,7 +218,7 @@ function playInboundAudioChunk(buffer, sampleRate) {
                 src.connect(playbackCtx.destination);
                 const now = playbackCtx.currentTime;
                 // Bug 4 Fix: Tight 300ms lookahead clamp absorbs network jitter bursts without scheduling seconds ahead
-                const MAX_LOOKAHEAD = 0.30;
+                const MAX_LOOKAHEAD = 1.50; // H3 Fix: 1.5s lookahead avoids chunk overlap
                 if (nextPlayTime < now) {
                     nextPlayTime = now;
                 }
@@ -263,7 +268,7 @@ function playInboundAudioChunk(buffer, sampleRate) {
         src.connect(playbackCtx.destination);
         const now = playbackCtx.currentTime;
         // Bug 4 Fix: Tight 300ms lookahead clamp absorbs network jitter bursts without scheduling seconds ahead
-        const MAX_LOOKAHEAD = 0.30;
+        const MAX_LOOKAHEAD = 1.50; // H3 Fix: 1.5s lookahead avoids chunk overlap
         if (nextPlayTime < now) {
             nextPlayTime = now;
         }
@@ -557,7 +562,7 @@ export async function invoke(cmd, args) {
                             try {
                                 const msg = JSON.parse(e.data);
                                 if (msg.type === 'audio') {
-                                    // C3 Fix: Robust dedup — only dedup when utteranceId is a non-empty string
+                                    // C3 Fix: Robust dedup — only dedup when utteranceId is a non-empty string (not null/undefined/"undefined")
                                     if (typeof msg.utteranceId === 'string' && msg.utteranceId.length > 0 && msg.utteranceId !== 'undefined' && msg.chunkSeq !== undefined) {
                                         const chunkKey = `${msg.from || ''}:${msg.utteranceId}:${msg.chunkSeq}`;
                                         if (browserSeenAudioChunks.has(chunkKey)) {
@@ -567,20 +572,25 @@ export async function invoke(cmd, args) {
                                             return;
                                         }
                                         browserSeenAudioChunks.add(chunkKey);
+                                        // L5 Fix: Evict oldest 10% when over cap, not just 1 entry
                                         if (browserSeenAudioChunks.size > 500) {
                                             const it = browserSeenAudioChunks.values();
                                             for (let i = 0; i < 50; i++) {
                                                 const v = it.next().value;
-                                                if (v) browserSeenAudioChunks.delete(v);
+                                                if (v)
+                                                    browserSeenAudioChunks.delete(v);
                                             }
                                         }
                                     }
                                     const isWavCodec = msg.codec === 'wav';
-                                    // Bug 1 Fix: Streaming PCM lane is 48 kHz when omitted; WAV batch lane is 24 kHz
+                                    // Bug 1 & C2 Fix: Streaming PCM lane is 48 kHz when omitted; WAV batch lane is 24 kHz.
+                                    // Do not overwrite lastKnownRate with WAV's 24kHz so raw PCM lanes retain 48kHz!
                                     const sr = (typeof msg.sampleRate === 'number' && msg.sampleRate > 0)
                                         ? msg.sampleRate
                                         : (isWavCodec ? 24000 : 48000);
-                                    lastKnownRate = sr;
+                                    if (!isWavCodec) {
+                                        lastKnownRate = sr;
+                                    }
                                     if (msg.hasBinary === true) {
                                         // Bug 3 Fix: If an orphan binary frame arrived earlier while waiting for its header, pair it now!
                                         if (pendingBinaryQueue.length > 0) {
@@ -594,6 +604,8 @@ export async function invoke(cmd, args) {
                                         }
                                     }
                                     else if (msg.endOfUtterance || msg.last) {
+                                        // L3 Fix: Only clear meta queue (text headers). Keep pendingBinaryQueue intact
+                                        // so orphan binaries from a subsequent utterance aren't lost.
                                         pendingAudioMetaQueue = [];
                                     }
                                 }

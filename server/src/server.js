@@ -408,6 +408,7 @@ wss.on('connection', (ws, req) => {
           tone: normalizeTone(msg.tone || sessionPayload.tone),
           displayName: (msg.displayName || 'anon').slice(0, 64),
           captionsOn: msg.captionsOn !== false,  // default true
+          token: msg.token || sessionPayload.token || '',
           ws,
           joinedAt: Date.now(),
         };
@@ -506,12 +507,14 @@ wss.on('connection', (ws, req) => {
         const newTargets = computeTargets(client.room, client.session.sessionId, tgt);
         if (msg.voice) client.session.voice = normalizeVoice(msg.voice);
         if (msg.tone) client.session.tone = normalizeTone(msg.tone);
+        if (msg.token) client.session.token = msg.token;
+        client.reconnectAttempts = 0; // M6 Fix: User-initiated operation resets reconnect retry counter
 
         client.upstream = bindUpstream(client,
           {
             sourceLang: src,
             targetLangs: newTargets,
-            sessionToken: msg.token ?? '',
+            sessionToken: client.session.token || '',
             silenceMs: 1000,
             voice: client.session.voice,
             tone: client.session.tone,
@@ -557,6 +560,7 @@ wss.on('connection', (ws, req) => {
         }
         client.session.voice = newVoice;
         client.session.tone = newTone;
+        client.reconnectAttempts = 0; // M6 Fix: User-initiated operation resets reconnect retry counter
 
         // Re-open upstream Ollalink stream with the updated voice and tone
         if (client.upstream) {
@@ -567,7 +571,7 @@ wss.on('connection', (ws, req) => {
           {
             sourceLang: client.session.sourceLang,
             targetLangs: currentTargets,
-            sessionToken: client.session.sessionId,
+            sessionToken: client.session.token || '',
             voice: newVoice,
             tone: newTone,
             silenceMs: 1000,
@@ -592,10 +596,14 @@ wss.on('connection', (ws, req) => {
       return; // unknown JSON frame; ignore
     }
 
-    // Binary PCM from client -> forward immediately to Ollalink.
-    // Client already paces at real time (0.5s chunks per Ollalink docs). No server-side queue needed.
+    // Binary PCM from client -> queue with cap and pace to Ollalink at real-time rate
     if (!client.upstream?.isOpen()) return;
-    try { client.upstream.send(data); } catch { /* ignore */ }
+    if (!client.upstreamQueue) client.upstreamQueue = [];
+    if (client.upstreamQueue.length >= 250) {
+      client.upstreamQueue.shift(); // Drop oldest to enforce bounded cap (cap=250 frames ~ 5s)
+    }
+    client.upstreamQueue.push(data);
+    schedulePacedUpstreamSend(client);
   });
 
   ws.on('close', () => {
@@ -667,7 +675,7 @@ function reopenUpstreamIfTargetsChanged(peerClient, newTargets) {
     {
       sourceLang: peerClient.session.sourceLang,
       targetLangs: newTargets,
-      sessionToken: peerClient.session.sessionId || '',
+      sessionToken: peerClient.session.token || '',
       voice: peerClient.session.voice,
       tone: peerClient.session.tone,
       silenceMs: 1000,
@@ -758,7 +766,7 @@ function scheduleUpstreamReconnect(client, { reason = 'error', backoff = true } 
     client.upstream = bindUpstream(client, {
       sourceLang: client.session.sourceLang,
       targetLangs: targets,
-      sessionToken: client.session.sessionId || '',
+      sessionToken: client.session.token || '',
       voice: client.session.voice,
       tone: client.session.tone,
       silenceMs: 1000,
@@ -1037,7 +1045,8 @@ export function schedulePacedUpstreamSend(client) {
   }
 
   // Calculate real-time duration of this PCM chunk (16kHz mono s16le = 32 bytes/ms)
-  const durationMs = Math.max(10, Math.min(100, Math.floor(chunk.length / 32)));
+  // H1 Fix: Do not clamp to 100ms! Allow true chunk duration (e.g. 128ms, 200ms) with a safe cap of 1000ms
+  const durationMs = Math.max(10, Math.min(1000, Math.floor(chunk.length / 32)));
 
   // Bug 28 Fix: Store timer handle to cancel on reconnect
   if (client.upstreamPacingTimer) {

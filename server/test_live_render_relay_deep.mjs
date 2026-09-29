@@ -2,11 +2,12 @@
 import WebSocket from 'ws';
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 
-const RENDER_BASE = 'https://windows-live-translation-app-1.onrender.com';
-const RENDER_WS = 'wss://windows-live-translation-app-1.onrender.com/call';
-const AUDIO_INPUT = 'C:/Users/Dell/Downloads/input_english_voice_sent_to_gpu.wav';
-const PROOF_OUTPUT = 'C:/Users/Dell/Downloads/proof_live_render_relay_transferred_hindi.wav';
+const RENDER_BASE = process.env.RELAY_URL || 'https://windows-live-translation-app-1.onrender.com';
+const RENDER_WS = process.env.RELAY_WS_URL || 'wss://windows-live-translation-app-1.onrender.com/call';
+const AUDIO_INPUT = process.env.AUDIO_INPUT || path.join(os.tmpdir(), 'input_english_voice_sent_to_gpu.wav');
+const PROOF_OUTPUT = process.env.PROOF_OUTPUT || path.join(os.tmpdir(), 'proof_live_render_relay_transferred_hindi.wav');
 
 function writeWavHeader(sampleRate, channels, bitDepth, dataLength) {
   const header = Buffer.alloc(44);
